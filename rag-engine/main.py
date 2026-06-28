@@ -49,7 +49,7 @@ COLLECTION_NAME = "code_vectors"
 collection = mongo_client[DB_NAME][COLLECTION_NAME]
 
 # Initialize Google's Embedding Model (translates text to vectors)
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
 
 # Initialize MongoDB Atlas Vector Search integration
 vector_store = MongoDBAtlasVectorSearch(
@@ -67,12 +67,13 @@ retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 # 3. LLM Configuration (Google Gemini)
 # ---------------------------------------------------------
 # Initialize Gemini 1.5 Flash with streaming enabled
+# Initialize Gemini with a supported version
+# Initialize Gemini with the current 2026 stable version
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    temperature=0.2, # Low temperature for factual, code-based accuracy
+    model="gemini-3.5-flash",
+    temperature=0.2, 
     streaming=True
 )
-
 # ---------------------------------------------------------
 # 4. LangChain LCEL Pipeline Setup
 # ---------------------------------------------------------
