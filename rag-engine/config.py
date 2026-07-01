@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from celery import Celery
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import MongoClient
 
 # Load environment variables
 load_dotenv()
@@ -16,13 +17,24 @@ celery_app = Celery(
     backend=REDIS_URL
 )
 
-# Initialize AsyncIOMotorClient
+# ---------------------------------------------------------
+# Async MongoDB Client (Motor) — for session status updates
+# ---------------------------------------------------------
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 
-# Helper function to access the database
 def get_db():
+    """Returns the async Motor database for session tracking."""
     try:
         return mongo_client.get_default_database()
     except Exception:
         # Fallback if database name is not specified in the URI
         return mongo_client.get_database("api-gateway")
+
+# ---------------------------------------------------------
+# Sync MongoDB Client (PyMongo) — for LangChain vector store
+# ---------------------------------------------------------
+sync_mongo_client = MongoClient(MONGO_URI)
+
+def get_sync_collection(db_name: str, collection_name: str):
+    """Returns a synchronous pymongo collection for LangChain integrations."""
+    return sync_mongo_client[db_name][collection_name]
