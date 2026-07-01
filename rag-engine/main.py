@@ -113,6 +113,8 @@ async def chat(session_id: str, request: ChatRequest):
     """
     Retrieves semantic code matches from Atlas and streams Gemini's analysis.
     """
+    if not request.query or not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
     async def generate_stream():
         try:
             # Asynchronously stream chunks directly from the LCEL chain
