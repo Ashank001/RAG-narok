@@ -1,0 +1,11 @@
+{
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Windows",
+  "venvPath": "c:/Users/ashan/OneDrive/Desktop/RAG_P1/rag-engine",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": "rag-engine"
+    }
+  ]
+}

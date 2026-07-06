@@ -30,6 +30,12 @@ export default function Home() {
     { id: "session_4", title: "Database Vector Indexing", timestamp: "3 days ago" },
   ]);
 
+  // --- Ingestion State ---
+  const [repoUrl, setRepoUrl] = useState("");
+  const [isIngesting, setIsIngesting] = useState(false);
+  const [ingestResult, setIngestResult] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [isIngestPanelOpen, setIsIngestPanelOpen] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -206,9 +212,9 @@ export default function Home() {
           prev.map((msg) =>
             msg.id === assistantPlaceholder.id
               ? {
-                  ...msg,
-                  content: `⚠️ Connection Failed.\n\nCould not stream response from FastAPI server. Please check if the backend is running at http://127.0.0.1:8000/chat/session_123 or switch to Demo Mode.`,
-                }
+                ...msg,
+                content: `⚠️ Connection Failed.\n\nCould not stream response from FastAPI server. Please check if the backend is running at http://127.0.0.1:8000/chat/session_123 or switch to Demo Mode.`,
+              }
               : msg
           )
         );
@@ -248,10 +254,10 @@ export default function Home() {
           prev.map((msg) =>
             msg.id === placeholderId
               ? {
-                  ...msg,
-                  content: msg.content + "\n\n*[Response generation cancelled by user]*",
-                  isStreaming: false,
-                }
+                ...msg,
+                content: msg.content + "\n\n*[Response generation cancelled by user]*",
+                isStreaming: false,
+              }
               : msg
           )
         );
@@ -347,6 +353,51 @@ export default function Home() {
     setInput("");
   };
 
+  // --- Ingestion Handler ---
+  const handleIngestRepository = async () => {
+    const trimmedUrl = repoUrl.trim();
+    if (!trimmedUrl || isIngesting) return;
+
+    // Basic URL validation
+    if (!trimmedUrl.startsWith("https://github.com/")) {
+      setIngestResult({ type: "error", message: "Please enter a valid GitHub repository URL (https://github.com/...)" });
+      return;
+    }
+
+    setIsIngesting(true);
+    setIngestResult(null);
+
+    const sessionId = `ingest_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, repositoryUrl: trimmedUrl }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      setIngestResult({
+        type: "success",
+        message: `Ingestion queued! Session: ${data.sessionId || sessionId}`,
+      });
+      setRepoUrl("");
+    } catch (error: any) {
+      setIngestResult({
+        type: "error",
+        message: error.message || "Failed to connect to ingestion API.",
+      });
+    } finally {
+      setIsIngesting(false);
+      // Auto-clear success messages after 6 seconds
+      setTimeout(() => setIngestResult(null), 6000);
+    }
+  };
+
   return (
     <div className={`flex h-screen w-full overflow-hidden font-sans transition-colors duration-300 ${isDarkMode ? "bg-zinc-900 text-zinc-100" : "bg-zinc-50 text-zinc-800"}`}>
       {/* Dynamic Cursor Blinking style */}
@@ -368,9 +419,8 @@ export default function Home() {
 
       {/* LEFT SIDEBAR */}
       <aside
-        className={`fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-zinc-200 bg-zinc-950 text-zinc-300 transition-transform duration-300 ease-in-out md:static md:translate-x-0 ${
-          isSidebarOpen ? "translate-x-0" : "-translate-x-full"
-        } border-zinc-805 ${isDarkMode ? "border-zinc-800" : "border-zinc-200"}`}
+        className={`fixed inset-y-0 left-0 z-30 flex w-72 flex-col border-r border-zinc-200 bg-zinc-950 text-zinc-300 transition-transform duration-300 ease-in-out md:static md:translate-x-0 ${isSidebarOpen ? "translate-x-0" : "-translate-x-full"
+          } border-zinc-805 ${isDarkMode ? "border-zinc-800" : "border-zinc-200"}`}
       >
         {/* Sidebar Header */}
         <div className="flex h-14 items-center justify-between px-4 border-b border-zinc-800">
@@ -380,9 +430,9 @@ export default function Home() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
               </svg>
             </div>
-            <span className="font-semibold text-white tracking-wide text-sm">Antigravity RAG</span>
+            <span className="font-semibold text-white tracking-wide text-sm">RAGnarok</span>
           </div>
-          
+
           <button
             onClick={() => setIsSidebarOpen(false)}
             className="rounded-md p-1.5 hover:bg-zinc-800 hover:text-white md:hidden transition-colors"
@@ -406,6 +456,87 @@ export default function Home() {
           </button>
         </div>
 
+        {/* Repository Ingestion Panel */}
+        <div className="px-3.5">
+          <button
+            onClick={() => setIsIngestPanelOpen(!isIngestPanelOpen)}
+            className="flex w-full items-center justify-between rounded-xl border border-zinc-800/60 bg-zinc-900/40 hover:bg-zinc-800/40 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-all duration-200"
+          >
+            <div className="flex items-center gap-2">
+              <svg className="w-3.5 h-3.5 text-teal-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+              </svg>
+              <span>Ingest Repository</span>
+            </div>
+            <svg className={`w-3.5 h-3.5 transition-transform duration-200 ${isIngestPanelOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {isIngestPanelOpen && (
+            <div className="mt-2 rounded-xl border border-zinc-800/60 bg-zinc-900/50 p-3 space-y-2.5 animate-in slide-in-from-top-1 duration-200">
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                GitHub Repository URL
+              </label>
+              <input
+                type="url"
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleIngestRepository(); }}
+                placeholder="https://github.com/owner/repo"
+                disabled={isIngesting}
+                className="w-full rounded-lg border border-zinc-700/60 bg-zinc-950/80 px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 outline-none focus:border-teal-500/60 focus:ring-1 focus:ring-teal-500/30 transition-all disabled:opacity-50"
+              />
+              <button
+                onClick={handleIngestRepository}
+                disabled={!repoUrl.trim() || isIngesting}
+                className={`flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-all duration-200 ${isIngesting
+                    ? "bg-teal-600/20 text-teal-400 border border-teal-500/30 cursor-wait"
+                    : repoUrl.trim()
+                      ? "bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-500 hover:to-emerald-500 text-white shadow-md shadow-teal-900/30 active:scale-[0.98]"
+                      : "bg-zinc-800/60 text-zinc-600 border border-zinc-800 cursor-not-allowed"
+                  }`}
+              >
+                {isIngesting ? (
+                  <>
+                    <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Ingesting...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Ingest Repository
+                  </>
+                )}
+              </button>
+
+              {/* Result Feedback */}
+              {ingestResult && (
+                <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-[11px] leading-relaxed border ${ingestResult.type === "success"
+                    ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                    : "bg-red-500/10 text-red-400 border-red-500/20"
+                  }`}>
+                  {ingestResult.type === "success" ? (
+                    <svg className="w-3.5 h-3.5 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                    </svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                  )}
+                  <span>{ingestResult.message}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Sidebar Navigation / Chat History */}
         <div className="flex-1 overflow-y-auto px-3 py-2 space-y-6 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
           <div>
@@ -415,11 +546,10 @@ export default function Home() {
                 <button
                   key={session.id}
                   onClick={() => setActiveSession(session.id)}
-                  className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-all group ${
-                    activeSession === session.id
+                  className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-all group ${activeSession === session.id
                       ? "bg-zinc-850 text-white font-medium shadow-sm border-l-2 border-emerald-500 pl-2.5"
                       : "hover:bg-zinc-900/60 text-zinc-400 hover:text-zinc-200"
-                  }`}
+                    }`}
                 >
                   <span className="truncate max-w-[180px]">{session.title}</span>
                   <span className="text-[10px] text-zinc-600 group-hover:text-zinc-400 transition-colors">
@@ -438,13 +568,12 @@ export default function Home() {
             <span className="text-xs text-zinc-400">FastAPI Backend</span>
             <div className="flex items-center gap-1.5">
               <span
-                className={`h-2 w-2 rounded-full ${
-                  apiConnected === "connected"
+                className={`h-2 w-2 rounded-full ${apiConnected === "connected"
                     ? "bg-emerald-500 animate-pulse"
                     : apiConnected === "demo"
-                    ? "bg-amber-500"
-                    : "bg-red-500 animate-pulse"
-                }`}
+                      ? "bg-amber-500"
+                      : "bg-red-500 animate-pulse"
+                  }`}
               />
               <span className="text-[11px] font-medium capitalize text-zinc-300">
                 {apiConnected === "connected" ? "Online" : apiConnected === "demo" ? "Demo Mode" : "Offline"}
@@ -459,7 +588,7 @@ export default function Home() {
                 AK
               </div>
               <div className="flex flex-col">
-                <span className="text-sm font-medium text-white leading-none">Ashank K.</span>
+                <span className="text-sm font-medium text-white leading-none">Ashank Ramakrishnan</span>
                 <span className="text-[10px] text-zinc-500">Developer</span>
               </div>
             </div>
@@ -496,15 +625,13 @@ export default function Home() {
       {/* MAIN CHAT CONTENT AREA */}
       <main className="relative flex flex-1 flex-col overflow-hidden h-full">
         {/* Navigation Top Header */}
-        <header className={`flex h-14 items-center justify-between border-b px-4 ${
-          isDarkMode ? "border-zinc-800/80 bg-zinc-900/60" : "border-zinc-200 bg-white"
-        } backdrop-blur-md`}>
+        <header className={`flex h-14 items-center justify-between border-b px-4 ${isDarkMode ? "border-zinc-800/80 bg-zinc-900/60" : "border-zinc-200 bg-white"
+          } backdrop-blur-md`}>
           <div className="flex items-center gap-3">
             <button
               onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              className={`rounded-lg p-2 transition-colors ${
-                isDarkMode ? "hover:bg-zinc-800 text-zinc-400 hover:text-white" : "hover:bg-zinc-150 text-zinc-500 hover:text-zinc-900"
-              }`}
+              className={`rounded-lg p-2 transition-colors ${isDarkMode ? "hover:bg-zinc-800 text-zinc-400 hover:text-white" : "hover:bg-zinc-150 text-zinc-500 hover:text-zinc-900"
+                }`}
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
@@ -512,9 +639,8 @@ export default function Home() {
             </button>
 
             {/* Model Name Select (ChatGPT styling) */}
-            <div className={`flex items-center gap-1.5 rounded-xl px-3 py-1 text-sm font-medium ${
-              isDarkMode ? "hover:bg-zinc-800/60 text-zinc-300" : "hover:bg-zinc-100 text-zinc-700"
-            } cursor-pointer transition-colors`}>
+            <div className={`flex items-center gap-1.5 rounded-xl px-3 py-1 text-sm font-medium ${isDarkMode ? "hover:bg-zinc-800/60 text-zinc-300" : "hover:bg-zinc-100 text-zinc-700"
+              } cursor-pointer transition-colors`}>
               <span>Gemini 3.5 Flash</span>
               <svg className="w-4 h-4 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -536,9 +662,8 @@ export default function Home() {
         </header>
 
         {/* Scrollable Message History Area */}
-        <div className={`flex-1 overflow-y-auto px-4 py-6 md:px-8 space-y-6 scrollbar-thin ${
-          isDarkMode ? "scrollbar-thumb-zinc-800" : "scrollbar-thumb-zinc-300"
-        } scrollbar-track-transparent`}>
+        <div className={`flex-1 overflow-y-auto px-4 py-6 md:px-8 space-y-6 scrollbar-thin ${isDarkMode ? "scrollbar-thumb-zinc-800" : "scrollbar-thumb-zinc-300"
+          } scrollbar-track-transparent`}>
           {messages.length === 0 ? (
             /* Empty State Screen (ChatGPT Style Dashboard) */
             <div className="mx-auto flex max-w-2xl flex-col items-center justify-center pt-16 text-center">
@@ -584,11 +709,10 @@ export default function Home() {
                       setInput(card.prompt);
                       textareaRef.current?.focus();
                     }}
-                    className={`flex flex-col rounded-2xl border p-4 text-left transition-all duration-200 shadow-sm ${
-                      isDarkMode
+                    className={`flex flex-col rounded-2xl border p-4 text-left transition-all duration-200 shadow-sm ${isDarkMode
                         ? "border-zinc-800 bg-zinc-950/40 hover:bg-zinc-800/40 text-zinc-300"
                         : "border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-700"
-                    }`}
+                      }`}
                   >
                     <span className={`font-semibold text-xs ${isDarkMode ? "text-white" : "text-zinc-900"}`}>
                       {card.title}
@@ -604,14 +728,12 @@ export default function Home() {
               {messages.map((message) => (
                 <div
                   key={message.id}
-                  className={`flex w-full flex-col ${
-                    message.role === "user" ? "items-end" : "items-start"
-                  }`}
+                  className={`flex w-full flex-col ${message.role === "user" ? "items-end" : "items-start"
+                    }`}
                 >
                   <div
-                    className={`flex max-w-[85%] gap-3.5 ${
-                      message.role === "user" ? "flex-row-reverse" : "flex-row"
-                    }`}
+                    className={`flex max-w-[85%] gap-3.5 ${message.role === "user" ? "flex-row-reverse" : "flex-row"
+                      }`}
                   >
                     {/* Role Avatar */}
                     <div className="flex h-8.5 w-8.5 shrink-0 select-none items-center justify-center rounded-lg shadow-sm">
@@ -634,15 +756,14 @@ export default function Home() {
                         {message.role === "user" ? "You" : "Antigravity AI"}
                       </span>
                       <div
-                        className={`rounded-2xl px-4 py-3 text-sm shadow-sm leading-relaxed ${
-                          message.role === "user"
+                        className={`rounded-2xl px-4 py-3 text-sm shadow-sm leading-relaxed ${message.role === "user"
                             ? isDarkMode
                               ? "bg-zinc-800 text-zinc-100 rounded-tr-sm"
                               : "bg-indigo-600 text-white rounded-tr-sm"
                             : isDarkMode
-                            ? "bg-zinc-950/60 text-zinc-100 border border-zinc-800 rounded-tl-sm"
-                            : "bg-white text-zinc-800 border border-zinc-200/85 rounded-tl-sm"
-                        }`}
+                              ? "bg-zinc-950/60 text-zinc-100 border border-zinc-800 rounded-tl-sm"
+                              : "bg-white text-zinc-800 border border-zinc-200/85 rounded-tl-sm"
+                          }`}
                       >
                         <div className="space-y-2">
                           {renderMessageContent(message.content)}
@@ -669,20 +790,17 @@ export default function Home() {
         </div>
 
         {/* BOTTOM INPUT CONTAINER */}
-        <div className={`border-t p-4 ${
-          isDarkMode ? "border-zinc-800/80 bg-zinc-900/40" : "border-zinc-200 bg-zinc-50/70"
-        } backdrop-blur-md`}>
+        <div className={`border-t p-4 ${isDarkMode ? "border-zinc-800/80 bg-zinc-900/40" : "border-zinc-200 bg-zinc-50/70"
+          } backdrop-blur-md`}>
           <div className="mx-auto max-w-3xl">
-            <div className={`relative flex items-center rounded-2xl border shadow-md focus-within:ring-2 focus-within:ring-emerald-500/50 ${
-              isDarkMode
+            <div className={`relative flex items-center rounded-2xl border shadow-md focus-within:ring-2 focus-within:ring-emerald-500/50 ${isDarkMode
                 ? "border-zinc-800 bg-zinc-950 focus-within:border-zinc-700"
                 : "border-zinc-250 bg-white focus-within:border-zinc-300"
-            }`}>
+              }`}>
               {/* Attachment Placeholder */}
               <button
-                className={`ml-2.5 rounded-lg p-2.5 transition-colors ${
-                  isDarkMode ? "hover:bg-zinc-850 text-zinc-500 hover:text-zinc-300" : "hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600"
-                }`}
+                className={`ml-2.5 rounded-lg p-2.5 transition-colors ${isDarkMode ? "hover:bg-zinc-850 text-zinc-500 hover:text-zinc-300" : "hover:bg-zinc-100 text-zinc-400 hover:text-zinc-600"
+                  }`}
                 title="Mock Attachment"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -720,11 +838,10 @@ export default function Home() {
                   <button
                     onClick={() => handleSendMessage()}
                     disabled={!input.trim()}
-                    className={`flex h-8.5 w-8.5 items-center justify-center rounded-xl transition-all shadow-md active:scale-95 ${
-                      input.trim()
+                    className={`flex h-8.5 w-8.5 items-center justify-center rounded-xl transition-all shadow-md active:scale-95 ${input.trim()
                         ? "bg-emerald-500 hover:bg-emerald-400 text-white cursor-pointer"
                         : "bg-zinc-800 text-zinc-600 cursor-not-allowed border border-zinc-850"
-                    }`}
+                      }`}
                   >
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 10l7-7m0 0l7 7m-7-7v18" />
@@ -735,9 +852,8 @@ export default function Home() {
             </div>
 
             {/* Bottom Credits info */}
-            <p className={`mt-2 text-center text-[10px] ${
-              isDarkMode ? "text-zinc-600" : "text-zinc-400"
-            }`}>
+            <p className={`mt-2 text-center text-[10px] ${isDarkMode ? "text-zinc-600" : "text-zinc-400"
+              }`}>
               Antigravity Chat UI can make mistakes. FastAPI stream session config active at <code>http://127.0.0.1:8000/chat/session_123</code>.
             </p>
           </div>

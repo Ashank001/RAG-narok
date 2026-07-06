@@ -2,14 +2,16 @@ import os
 import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
+# Celery task import
+from worker import process_repository
 
 # LangChain & AI Imports
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -32,6 +34,10 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     query: str
+
+class IngestRequest(BaseModel):
+    sessionId: str
+    repositoryUrl: str
 
 # ---------------------------------------------------------
 # 2. Database & Vector Store Configuration
@@ -60,8 +66,6 @@ vector_store = MongoDBAtlasVectorSearch(
     embedding_key="embedding",
 )
 
-# Set up the Retriever to fetch the 4 closest matching code chunks
-retriever = vector_store.as_retriever(search_kwargs={"k": 4})
 
 # ---------------------------------------------------------
 # 3. LLM Configuration (Google Gemini)
@@ -75,35 +79,33 @@ llm = ChatGoogleGenerativeAI(
     streaming=True
 )
 # ---------------------------------------------------------
-# 4. LangChain LCEL Pipeline Setup
+# 4. LangChain Prompt & Chain (built dynamically per-request in /chat)
 # ---------------------------------------------------------
-system_prompt = (
-    "You are an elite software architecture assistant named RAGnarok. "
-    "Use the following retrieved codebase snippets to answer the user's question accurately. "
-    "If the answer is not contained within the provided context, state that clearly. "
-    "Do not hallucinate code that isn't there.\n\n"
-    "Codebase Context:\n{context}"
-)
+# The chat endpoint constructs the prompt at request time based on
+# whether vector context was retrieved. This avoids crashes when the
+# collection is empty (no repos ingested yet).
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{question}")
-])
-
-def format_docs(docs):
-    return "\n\n---\n\n".join(doc.page_content for doc in docs)
-
-# The core LCEL Chain: Retrieve -> Format -> Prompt -> LLM -> Parse String
-rag_chain = (
-    {"context": retriever | format_docs, "question": RunnablePassthrough()}
-    | prompt
-    | llm
-    | StrOutputParser()
-)
 
 # ---------------------------------------------------------
 # 5. API Endpoints
 # ---------------------------------------------------------
+@app.post("/api/ingest", status_code=202)
+async def ingest(request: IngestRequest):
+    """
+    Accepts a sessionId and repositoryUrl, dispatches the ingestion
+    task to the Celery worker via Redis, and returns immediately.
+    """
+    process_repository.delay(
+        payload={"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}
+    )
+    return JSONResponse(
+        status_code=202,
+        content={
+            "message": "Ingestion started in the background.",
+            "sessionId": request.sessionId,
+        },
+    )
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "rag-engine-active"}
@@ -111,22 +113,79 @@ def health():
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, request: ChatRequest):
     """
-    Retrieves semantic code matches from Atlas and streams Gemini's analysis.
+    RAG-powered chat endpoint:
+    1. Converts the user's query into a vector via GoogleGenerativeAIEmbeddings.
+    2. Performs similarity search on rag_db.code_vectors via MongoDBAtlasVectorSearch.
+    3. If context is found, injects it into a system prompt alongside the user's question.
+    4. If the collection is empty (no repos ingested), falls back to a direct LLM call.
+    5. Streams Gemini's response back to the frontend as SSE chunks.
     """
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
+
+    user_query = request.query.strip()
+
     async def generate_stream():
         try:
-            # Asynchronously stream chunks directly from the LCEL chain
-            async for chunk in rag_chain.astream(request.query):
-                # Format payload as Server-Sent Events (SSE) for frontend ingestion
+            # -------------------------------------------------
+            # Step 1: Retrieve relevant code chunks from Atlas
+            # -------------------------------------------------
+            context_text = ""
+            try:
+                retrieved_docs = vector_store.similarity_search(user_query, k=4)
+                if retrieved_docs:
+                    context_text = "\n\n---\n\n".join(
+                        doc.page_content for doc in retrieved_docs
+                    )
+                    print(f"[Chat | {session_id}] Retrieved {len(retrieved_docs)} chunks for query.")
+                else:
+                    print(f"[Chat | {session_id}] No matching documents found in vector store.")
+            except Exception as retrieval_err:
+                # Gracefully handle empty collection / missing index
+                print(f"[Chat | {session_id}] Retrieval skipped (empty DB or index not ready): {retrieval_err}")
+
+            # -------------------------------------------------
+            # Step 2: Build prompt based on whether context exists
+            # -------------------------------------------------
+            if context_text:
+                # RAG mode: inject retrieved codebase context
+                chat_prompt = ChatPromptTemplate.from_messages([
+                    ("system",
+                     "You are an elite software architecture assistant named RAGnarok. "
+                     "Use the following retrieved codebase snippets to answer the user's question accurately. "
+                     "Reference specific file names, functions, or patterns from the context when relevant. "
+                     "If the answer is not contained within the provided context, state that clearly. "
+                     "Do not hallucinate code that isn't there.\n\n"
+                     "Codebase Context:\n{context}"),
+                    ("human", "{question}")
+                ])
+                chain = chat_prompt | llm | StrOutputParser()
+                stream_input = {"context": context_text, "question": user_query}
+            else:
+                # Fallback mode: no context available, answer directly
+                chat_prompt = ChatPromptTemplate.from_messages([
+                    ("system",
+                     "You are an elite software architecture assistant named RAGnarok. "
+                     "No codebase has been ingested yet, so you have no repository context. "
+                     "Answer the user's question using your general knowledge. "
+                     "If the question seems to be about a specific codebase, suggest they ingest "
+                     "a repository first using the Ingest Repository panel."),
+                    ("human", "{question}")
+                ])
+                chain = chat_prompt | llm | StrOutputParser()
+                stream_input = {"question": user_query}
+
+            # -------------------------------------------------
+            # Step 3: Stream the LLM response as SSE
+            # -------------------------------------------------
+            async for chunk in chain.astream(stream_input):
                 yield f"data: {json.dumps({'text': chunk})}\n\n"
-            
+
             # Send completion signal
             yield f"data: {json.dumps({'done': True})}\n\n"
-            
+
         except Exception as e:
-            print(f"Streaming Error: {e}")
+            print(f"[Chat | {session_id}] Streaming Error: {e}")
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")

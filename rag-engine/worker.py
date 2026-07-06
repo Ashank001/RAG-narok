@@ -1,9 +1,9 @@
 import os
+import stat
 import shutil
-import asyncio
 import tempfile
 
-from config import celery_app, get_db, get_sync_collection
+from config import celery_app, get_sync_db, get_sync_collection
 from dotenv import load_dotenv
 
 # LangChain Imports
@@ -25,18 +25,49 @@ BATCH_SIZE = 50  # Documents per embedding batch to respect API rate limits
 
 
 # ---------------------------------------------------------
+# Windows Cleanup Helper
+# ---------------------------------------------------------
+import sys
+
+def _rmtree_onexc(func, path, exc):
+    """
+    Error handler for shutil.rmtree (Python 3.12+ `onexc` signature).
+    Git pack files are often marked read-only, causing WinError 5 (Access Denied).
+    This callback removes the read-only flag and retries the deletion.
+    """
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def _rmtree_onerror(func, path, exc_info):
+    """Legacy `onerror` callback for Python < 3.12."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def _rmtree_safe(path):
+    """Calls shutil.rmtree with the correct error-handler kwarg for the Python version."""
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_rmtree_onexc)
+    else:
+        shutil.rmtree(path, onerror=_rmtree_onerror)
+
+
+# ---------------------------------------------------------
 # Core Ingestion Logic
 # ---------------------------------------------------------
-async def update_session_status(session_id: str, status: str, error_log: str = None) -> None:
+def update_session_status(session_id: str, status: str, error_log: str | None = None) -> None:
     """
     Updates the session document in MongoDB with the current processing status.
+    Uses the synchronous PyMongo client to avoid 'Event loop is closed' errors
+    inside Celery worker processes.
     Optionally attaches an error log on failure.
     """
-    db = get_db()
+    db = get_sync_db()
     update_fields = {"status": status}
     if error_log:
         update_fields["errorLog"] = error_log
-    await db.sessions.update_one(
+    db.sessions.update_one(
         {"sessionId": session_id},
         {"$set": update_fields}
     )
@@ -63,12 +94,27 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         print(f"[Worker | {session_id}] Cloning repository: {repo_url}")
         print(f"[Worker | {session_id}] Temp directory: {repo_path}")
 
-        loader = GitLoader(
-            clone_url=repo_url,
-            repo_path=repo_path,
-            branch="main",  # Default branch assumption
-        )
-        docs = loader.load()
+        # Try cloning with 'main' first, fall back to 'master' for older repos
+        try:
+            loader = GitLoader(
+                clone_url=repo_url,
+                repo_path=repo_path,
+                branch="main",
+            )
+            docs = loader.load()
+        except Exception as branch_err:
+            print(f"[Worker | {session_id}] ⚠️ 'main' branch failed ({branch_err}), retrying with 'master'...")
+            # Clean up the failed clone before retrying
+            if os.path.exists(repo_path):
+                _rmtree_safe(repo_path)
+            repo_path = tempfile.mkdtemp(prefix=f"ragnarok_{session_id}_")
+            loader = GitLoader(
+                clone_url=repo_url,
+                repo_path=repo_path,
+                branch="master",
+            )
+            docs = loader.load()
+
         print(f"[Worker | {session_id}] Loaded {len(docs)} files from repository.")
 
         if not docs:
@@ -137,7 +183,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         if os.path.exists(repo_path):
             try:
-                shutil.rmtree(repo_path)
+                _rmtree_safe(repo_path)
                 print(f"[Worker | {session_id}] Cleaned up temp directory: {repo_path}")
             except Exception as cleanup_err:
                 print(f"[Worker | {session_id}] ⚠️ Failed to clean up {repo_path}: {cleanup_err}")
@@ -147,7 +193,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
 # Celery Task Definition
 # ---------------------------------------------------------
 @celery_app.task(name="process-repo", bind=True, max_retries=2)
-def process_repository(self, payload: dict = None, sessionId: str = None, repositoryUrl: str = None) -> dict:
+def process_repository(self, payload: dict | None = None, sessionId: str | None = None, repositoryUrl: str | None = None) -> dict:
     """
     Celery task entry point for repository ingestion.
 
@@ -176,7 +222,7 @@ def process_repository(self, payload: dict = None, sessionId: str = None, reposi
         )
 
     # Update session status to 'processing'
-    asyncio.run(update_session_status(session_id, "processing"))
+    update_session_status(session_id, "processing")
     print(f"[Worker | {session_id}] ▶ Task started for: {repo_url}")
 
     try:
@@ -184,7 +230,7 @@ def process_repository(self, payload: dict = None, sessionId: str = None, reposi
         result = ingest_repository(session_id, repo_url)
 
         # Mark session as completed
-        asyncio.run(update_session_status(session_id, "completed"))
+        update_session_status(session_id, "completed")
         print(f"[Worker | {session_id}] ✅ Task completed: {result}")
         return result
 
@@ -193,7 +239,7 @@ def process_repository(self, payload: dict = None, sessionId: str = None, reposi
         print(f"[Worker | {session_id}] ❌ Task failed: {error_msg}")
 
         # Mark session as failed with the error log
-        asyncio.run(update_session_status(session_id, "failed", error_log=error_msg))
+        update_session_status(session_id, "failed", error_log=error_msg)
 
         # Retry with exponential backoff (60s, then 120s)
         raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))
