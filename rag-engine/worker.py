@@ -3,13 +3,19 @@ import stat
 import shutil
 import tempfile
 
+# pyrefly: ignore [missing-import]
 from config import celery_app, get_sync_db, get_sync_collection
+# pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
 # LangChain Imports
+# pyrefly: ignore [missing-import]
 from langchain_community.document_loaders import GitLoader
+# pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+# pyrefly: ignore [missing-import]
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# pyrefly: ignore [missing-import]
 from langchain_mongodb import MongoDBAtlasVectorSearch
 
 load_dotenv()
@@ -91,6 +97,29 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 1: Clone the repository
         # --------------------------------------------------
+        # GAP-12 FIX: Only embed source code. Binaries, lock files, and
+        # media produce garbage vectors and burn embedding API quota.
+        SOURCE_CODE_EXTENSIONS = {
+            ".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".go", ".rs",
+            ".cpp", ".c", ".h", ".cs", ".rb", ".php", ".swift", ".kt",
+            ".scala", ".r", ".sh", ".bash", ".sql", ".html", ".css",
+            ".scss", ".yaml", ".yml", ".toml", ".json", ".md", ".txt",
+            ".env.example", ".dockerfile", "dockerfile",
+        }
+
+        def is_source_file(file_path: str) -> bool:
+            name = file_path.lower()
+            # Exclude lock files specifically
+            if any(name.endswith(lf) for lf in ["package-lock.json", "yarn.lock", "poetry.lock", "pipfile.lock", "pnpm-lock.yaml"]):
+                return False
+            # Exclude hidden/vendor/build directories
+            if any(seg in name.split("/") for seg in [".git", "node_modules", "__pycache__", ".venv", "dist", "build", ".next"]):
+                return False
+            import os as _os
+            ext = _os.path.splitext(file_path)[1].lower()
+            base = _os.path.basename(file_path).lower()
+            return ext in SOURCE_CODE_EXTENSIONS or base in SOURCE_CODE_EXTENSIONS
+
         print(f"[Worker | {session_id}] Cloning repository: {repo_url}")
         print(f"[Worker | {session_id}] Temp directory: {repo_path}")
 
@@ -100,6 +129,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 clone_url=repo_url,
                 repo_path=repo_path,
                 branch="main",
+                file_filter=is_source_file,
             )
             docs = loader.load()
         except Exception as branch_err:
@@ -112,10 +142,12 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 clone_url=repo_url,
                 repo_path=repo_path,
                 branch="master",
+                file_filter=is_source_file,
             )
             docs = loader.load()
 
-        print(f"[Worker | {session_id}] Loaded {len(docs)} files from repository.")
+        print(f"[Worker | {session_id}] Loaded {len(docs)} source files (binaries/lockfiles excluded).")
+
 
         if not docs:
             raise ValueError("Repository cloned but contained no loadable documents.")
