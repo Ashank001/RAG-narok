@@ -1,6 +1,9 @@
 "use client";
 
 import React, { useState, useEffect, useRef, FormEvent, KeyboardEvent } from "react";
+import { useRouter } from "next/navigation";
+import { getAuthToken, getUsername, clearAuthToken, isAuthenticated } from "@/lib/auth";
+import { apiFetch } from "@/lib/api";
 
 interface Message {
   id: string;
@@ -16,6 +19,8 @@ interface ChatSession {
 }
 
 export default function Home() {
+  const router = useRouter();
+  const [authUsername, setAuthUsername] = useState<string>("You");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -45,17 +50,26 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Auth guard: redirect to /login if no token is present
+  useEffect(() => {
+    if (!isAuthenticated()) {
+      router.replace("/login");
+    } else {
+      const stored = getUsername();
+      if (stored) setAuthUsername(stored);
+    }
+  }, [router]);
+
   // Check API connectivity initially
   useEffect(() => {
     const checkAPI = async () => {
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2000);
-        // Simple test request to verify server availability
-        const response = await fetch("http://127.0.0.1:8000/chat/session_123", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: "" }),
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        // Use apiFetch so the request goes to localhost:8000 (matching CORS allowed origins)
+        // Hit /health — a lightweight unauthenticated endpoint
+        const response = await apiFetch("/health", {
+          method: "GET",
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -111,11 +125,8 @@ export default function Home() {
     }
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/chat/session_123", {
+      const response = await apiFetch(`/chat/${activeSession}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify({ query: queryText }),
         signal: abortController.signal,
       });
@@ -370,9 +381,8 @@ export default function Home() {
     const sessionId = `ingest_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/ingest", {
+      const response = await apiFetch("/api/ingest", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId, repositoryUrl: trimmedUrl }),
       });
 
@@ -585,11 +595,11 @@ export default function Home() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white font-semibold text-xs shadow-md">
-                AK
+                {authUsername.slice(0, 2).toUpperCase()}
               </div>
               <div className="flex flex-col">
-                <span className="text-sm font-medium text-white leading-none">Ashank Ramakrishnan</span>
-                <span className="text-[10px] text-zinc-500">Developer</span>
+                <span className="text-sm font-medium text-white leading-none">{authUsername}</span>
+                <span className="text-[10px] text-zinc-500">GitHub · Developer</span>
               </div>
             </div>
 
@@ -608,6 +618,17 @@ export default function Home() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
                   </svg>
                 )}
+              </button>
+              {/* Logout button */}
+              <button
+                id="logout-btn"
+                onClick={() => { clearAuthToken(); router.replace("/login"); }}
+                className="rounded-lg p-2 text-zinc-400 hover:bg-red-900/40 hover:text-red-400 transition-colors"
+                title="Sign out"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
               </button>
             </div>
           </div>
@@ -739,7 +760,7 @@ export default function Home() {
                     <div className="flex h-8.5 w-8.5 shrink-0 select-none items-center justify-center rounded-lg shadow-sm">
                       {message.role === "user" ? (
                         <div className="flex h-full w-full items-center justify-center rounded-lg bg-gradient-to-tr from-indigo-500 to-indigo-600 text-[11px] font-semibold text-white">
-                          AK
+                          {authUsername.slice(0, 2).toUpperCase()}
                         </div>
                       ) : (
                         <div className="flex h-full w-full items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 to-teal-500 text-white">
