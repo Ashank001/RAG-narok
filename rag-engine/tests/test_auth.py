@@ -17,8 +17,9 @@ Tests:
 import json
 from unittest.mock import patch, AsyncMock, MagicMock
 
+# pyrefly: ignore [missing-import]
 import pytest
-from conftest import make_token, make_expired_token, TEST_JWT_SECRET, TEST_ALGORITHM
+from conftest import make_token, make_expired_token, TEST_JWT_SECRET, TEST_ALGORITHM  # pyrefly: ignore [missing-import]
 
 # ============================================================
 # 1. Public health endpoint
@@ -74,7 +75,7 @@ def test_chat_rejects_bad_signature(client):
     """A JWT signed with a wrong secret must be rejected."""
     bad_token = make_token("hacker", expires_in_minutes=60)
     # Re-sign with a different secret to simulate tampering
-    from jose import jwt as _jwt
+    from jose import jwt as _jwt  # pyrefly: ignore [missing-import, missing-source-for-stubs]
     parts = bad_token.split(".")
     # Corrupt the signature
     tampered = f"{parts[0]}.{parts[1]}.INVALIDSIGNATURE"
@@ -146,7 +147,7 @@ def test_github_auth_success(client):
     assert data["token_type"] == "bearer"
 
     # Verify the returned token is a real JWT with the correct subject
-    from jose import jwt as _jwt
+    from jose import jwt as _jwt  # pyrefly: ignore [missing-import, missing-source-for-stubs]
     payload = _jwt.decode(data["access_token"], TEST_JWT_SECRET, algorithms=[TEST_ALGORITHM])
     assert payload["sub"] == "testuser"
 
@@ -191,9 +192,9 @@ def test_github_auth_invalid_code(client):
 
 def test_token_without_sub_rejected(client):
     """A JWT missing the 'sub' claim must be rejected as unauthenticated."""
-    from jose import jwt as _jwt
-    from datetime import datetime, timedelta
-    payload = {"exp": datetime.utcnow() + timedelta(minutes=60)}  # no 'sub'
+    from jose import jwt as _jwt  # pyrefly: ignore [missing-import, missing-source-for-stubs]
+    from datetime import datetime, timedelta, timezone
+    payload = {"exp": datetime.now(timezone.utc) + timedelta(minutes=60)}  # no 'sub'
     no_sub_token = _jwt.encode(payload, TEST_JWT_SECRET, algorithm=TEST_ALGORITHM)
     resp = client.post(
         "/chat/test_session",

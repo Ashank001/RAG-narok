@@ -6,6 +6,8 @@ services:
     container_name: hub-redis
     ports:
       - "6379:6379"
+    environment:
+      - TZ=Asia/Kolkata   # match host timezone → fixes Celery clock drift warning
     networks:
       - hub-network
 
@@ -15,36 +17,47 @@ services:
     working_dir: /app
     volumes:
       - ./api-gateway:/app
+      - api_gateway_node_modules:/app/node_modules
+    env_file:
+      - ./api-gateway/.env
     ports:
-      - "3000:3000"
-    command: sh -c "echo 'API Gateway placeholder starting...' && tail -f /dev/null"
+      - "3001:3000"
+    depends_on:
+      - redis
+    command: sh -c "npm install && npm run dev"
     networks:
       - hub-network
 
   rag-engine:
-    image: python:3.10-slim
+    image: python:3.11-slim
     container_name: hub-rag-engine
     working_dir: /app
     volumes:
       - ./rag-engine:/app
+      # Persist pip's download cache so restarts don't re-download packages
+      - pip-cache:/root/.cache/pip
+    env_file:
+      - ./rag-engine/.env
+    environment:
+      # Override REDIS_URL so Celery connects to the Docker service name, not localhost
+      - REDIS_URL=redis://redis:6379/0
     ports:
       - "8000:8000"
-    command: sh -c "echo 'RAG Engine placeholder starting...' && tail -f /dev/null"
+    depends_on:
+      - redis
+    command: sh -c "chmod +x /app/start.sh && /app/start.sh"
     networks:
       - hub-network
 
-  frontend:
-    image: node:18-alpine
-    container_name: hub-frontend
-    working_dir: /app
-    volumes:
-      - ./frontend:/app
-    ports:
-      - "3001:3001"
-    command: sh -c "echo 'Frontend placeholder starting...' && tail -f /dev/null"
-    networks:
-      - hub-network
+  # frontend runs locally via 'npm run dev' on port 3000
+  # matching the GitHub OAuth callback URL you registered.
+  # To start it: cd frontend && npm run dev
 
 networks:
   hub-network:
     driver: bridge
+
+volumes:
+  pip-cache:
+  api_gateway_node_modules:
+  frontend_node_modules:

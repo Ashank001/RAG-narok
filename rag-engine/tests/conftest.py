@@ -15,14 +15,25 @@ Install test dependencies:
 """
 
 import os
+import sys
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Generator
 from unittest.mock import MagicMock, patch, AsyncMock
 
+# Ensure the rag-engine root and tests/ are on sys.path so pytest can
+# resolve 'from conftest import ...' and 'from main import app' correctly.
+_here = os.path.dirname(os.path.abspath(__file__))
+_rag_root = os.path.dirname(_here)
+for _p in (_rag_root, _here):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# pyrefly: ignore [missing-import]
 import pytest
+# pyrefly: ignore [missing-import]
 from fastapi.testclient import TestClient
-from jose import jwt
+from jose import jwt  # pyrefly: ignore [missing-import, missing-source-for-stubs]
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +61,14 @@ def make_token(username: str, expires_in_minutes: int = 60) -> str:
     Mint a valid JWT for the given username WITHOUT going through GitHub OAuth.
     This is what the tests use to authenticate against the FastAPI endpoints.
     """
-    expire = datetime.utcnow() + timedelta(minutes=expires_in_minutes)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=expires_in_minutes)
     payload = {"sub": username, "exp": expire}
     return jwt.encode(payload, TEST_JWT_SECRET, algorithm=TEST_ALGORITHM)
 
 
 def make_expired_token(username: str) -> str:
     """Mint a JWT that is already expired."""
-    expire = datetime.utcnow() - timedelta(minutes=5)
+    expire = datetime.now(timezone.utc) - timedelta(minutes=5)
     payload = {"sub": username, "exp": expire}
     return jwt.encode(payload, TEST_JWT_SECRET, algorithm=TEST_ALGORITHM)
 
@@ -110,7 +121,7 @@ def mock_mongo():
     avoiding repeated setup/teardown overhead.
     """
     try:
-        import mongomock
+        import mongomock  # pyrefly: ignore [missing-import]
         client = mongomock.MongoClient()
         yield client
     except ImportError:
@@ -143,6 +154,7 @@ def client(mock_mongo) -> Generator:
         patch("pymongo.MongoClient", return_value=mock_mongo),
         patch("langchain_mongodb.MongoDBAtlasVectorSearch", return_value=mock_vs),
     ):
+        # pyrefly: ignore [missing-import]
         from main import app
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c

@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from celery import Celery
 # pyrefly: ignore [missing-import]
 from pymongo import MongoClient
+# pyrefly: ignore [missing-import]
+import certifi
 
 # Load environment variables
 load_dotenv()
@@ -19,10 +21,10 @@ celery_app = Celery(
     backend=REDIS_URL
 )
 
-# ---------------------------------------------------------
 # Sync MongoDB Client (PyMongo)
-# ---------------------------------------------------------
-sync_mongo_client = MongoClient(MONGO_URI)
+# tlsCAFile=certifi.where() fixes TLSV1_ALERT_INTERNAL_ERROR on Windows/older OpenSSL
+# tlsAllowInvalidCertificates=True is a dev-only fallback for Windows TLS handshake issues
+sync_mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True)
 
 def get_sync_db():
     """Returns the synchronous pymongo database for session tracking."""

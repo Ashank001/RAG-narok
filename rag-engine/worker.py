@@ -1,7 +1,11 @@
 import os
+import re
 import stat
 import shutil
 import tempfile
+import sys
+import time
+import git
 
 # pyrefly: ignore [missing-import]
 from config import celery_app, get_sync_db, get_sync_collection
@@ -14,7 +18,7 @@ from langchain_community.document_loaders import GitLoader
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 # pyrefly: ignore [missing-import]
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 # pyrefly: ignore [missing-import]
 from langchain_mongodb import MongoDBAtlasVectorSearch
 
@@ -26,15 +30,42 @@ load_dotenv()
 DB_NAME = "rag_db"
 COLLECTION_NAME = "code_vectors"
 ATLAS_INDEX_NAME = "vector_index"
-EMBEDDING_MODEL = "gemini-embedding-001"
-BATCH_SIZE = 50  # Documents per embedding batch to respect API rate limits
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Local CPU model; 384 dims; no API key or quota needed
+BATCH_SIZE = 50  # Local model has no rate limits; larger batches = faster ingestion
+
+
+# ---------------------------------------------------------
+# Rate-limit helpers
+# ---------------------------------------------------------
+def _parse_retry_delay_secs(exc: Exception, default: float) -> float:
+    """
+    Google's 429 errors embed a suggested retry delay in the message.
+    e.g. "Please retry in 37.499159864s."  or  "retryDelay: '37s'"
+    Parse that value so we never wait less than Google asks for.
+    """
+    text = str(exc)
+    # Match patterns like "37.5s", "37s", "1.9s" from the error body
+    match = re.search(r'retry\s+in\s+(\d+(?:\.\d+)?)s', text, re.IGNORECASE)
+    if match:
+        suggested = float(match.group(1))
+        # Add 2 s of headroom and cap at 120 s so we don't block forever
+        return min(suggested + 2.0, 120.0)
+    return default
+
+
+def _is_daily_quota_exhausted(exc: Exception) -> bool:
+    """
+    Returns True if the 429 is a DAILY quota exhaustion (PerDay quotaId),
+    as opposed to a transient per-minute rate limit (PerMinute quotaId).
+    Daily quota won't reset until midnight — retrying is pointless.
+    """
+    text = str(exc)
+    return "PerDay" in text or "PerDayPer" in text
 
 
 # ---------------------------------------------------------
 # Windows Cleanup Helper
 # ---------------------------------------------------------
-import sys
-
 def _rmtree_onexc(func, path, exc):
     """
     Error handler for shutil.rmtree (Python 3.12+ `onexc` signature).
@@ -73,10 +104,17 @@ def update_session_status(session_id: str, status: str, error_log: str | None = 
     update_fields = {"status": status}
     if error_log:
         update_fields["errorLog"] = error_log
-    db.sessions.update_one(
-        {"sessionId": session_id},
-        {"$set": update_fields}
-    )
+        db.sessions.update_one(
+            {"sessionId": session_id},
+            {"$set": update_fields},
+            upsert=True
+        )
+    else:
+        db.sessions.update_one(
+            {"sessionId": session_id},
+            {"$set": update_fields, "$unset": {"errorLog": ""}},
+            upsert=True
+        )
 
 
 def ingest_repository(session_id: str, repo_url: str) -> dict:
@@ -123,31 +161,26 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         print(f"[Worker | {session_id}] Cloning repository: {repo_url}")
         print(f"[Worker | {session_id}] Temp directory: {repo_path}")
 
-        # Try cloning with 'main' first, fall back to 'master' for older repos
         try:
+            repo = git.Repo.clone_from(
+                url=repo_url,
+                to_path=repo_path,
+                depth=1
+            )
+            default_branch = repo.active_branch.name
+            print(f"[Worker | {session_id}] Successfully cloned shallow copy (depth=1) of branch: {default_branch}")
+            
             loader = GitLoader(
-                clone_url=repo_url,
                 repo_path=repo_path,
-                branch="main",
+                branch=default_branch,
                 file_filter=is_source_file,
             )
             docs = loader.load()
-        except Exception as branch_err:
-            print(f"[Worker | {session_id}] ⚠️ 'main' branch failed ({branch_err}), retrying with 'master'...")
-            # Clean up the failed clone before retrying
-            if os.path.exists(repo_path):
-                _rmtree_safe(repo_path)
-            repo_path = tempfile.mkdtemp(prefix=f"ragnarok_{session_id}_")
-            loader = GitLoader(
-                clone_url=repo_url,
-                repo_path=repo_path,
-                branch="master",
-                file_filter=is_source_file,
-            )
-            docs = loader.load()
+        except Exception as clone_err:
+            print(f"[Worker | {session_id}] ❌ Clone failed: {clone_err}")
+            raise clone_err
 
         print(f"[Worker | {session_id}] Loaded {len(docs)} source files (binaries/lockfiles excluded).")
-
 
         if not docs:
             raise ValueError("Repository cloned but contained no loadable documents.")
@@ -173,8 +206,13 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 3: Initialize embedding model
         # --------------------------------------------------
-        print(f"[Worker | {session_id}] Initializing embedding model: {EMBEDDING_MODEL}")
-        embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
+        print(f"[Worker | {session_id}] Initializing local embedding model: {EMBEDDING_MODEL}")
+        embeddings = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            # Run on CPU; set device="cuda" if you have a GPU
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
 
         # --------------------------------------------------
         # Step 4: Upload to MongoDB Atlas Vector Search
@@ -198,8 +236,32 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
             print(f"[Worker | {session_id}] Embedding & uploading batch {batch_num}/{total_batches} ({len(batch)} chunks)...")
 
-            vector_store.add_documents(batch)
-            total_uploaded += len(batch)
+            max_batch_retries = 8
+            backoff_delay = 5.0
+            for attempt in range(1, max_batch_retries + 1):
+                try:
+                    vector_store.add_documents(batch)
+                    total_uploaded += len(batch)
+                    break
+                except Exception as exc:
+                    # Daily quota is permanent until midnight — fail fast with a clear message.
+                    if _is_daily_quota_exhausted(exc):
+                        msg = (
+                            f"[Worker | {session_id}] Daily embedding quota exhausted on batch {batch_num}. "
+                            "Switch to a new GOOGLE_API_KEY or wait until the quota resets at midnight Pacific."
+                        )
+                        print(msg)
+                        raise RuntimeError(msg) from exc
+                    if attempt == max_batch_retries:
+                        print(f"[Worker | {session_id}] Batch {batch_num} failed after {max_batch_retries} attempts: {exc}")
+                        raise exc
+                    # Per-minute rate limit — honour the server-suggested retryDelay.
+                    wait = _parse_retry_delay_secs(exc, default=backoff_delay)
+                    print(f"[Worker | {session_id}] Batch {batch_num} failed (attempt {attempt}/{max_batch_retries}): rate limited. Retrying in {wait:.1f}s...")
+                    time.sleep(wait)
+                    backoff_delay = min(backoff_delay * 2.0, 120.0)
+
+            # No sleep needed — local model has no API rate limits
 
         print(f"[Worker | {session_id}] ✅ Successfully uploaded {total_uploaded} vectors to Atlas.")
 
@@ -232,12 +294,6 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
     Accepts arguments either as keyword args or nested inside a `payload` dict:
         - sessionId (str): Unique session identifier for status tracking.
         - repositoryUrl (str): HTTPS URL of the GitHub repository to ingest.
-
-    Lifecycle:
-        1. Validates inputs.
-        2. Sets session status to 'processing'.
-        3. Runs the synchronous ingestion pipeline (clone → chunk → embed → upload).
-        4. Sets session status to 'completed' on success, or 'failed' on error.
     """
     # Resolve arguments from payload dict or direct kwargs
     session_id = sessionId
@@ -270,8 +326,13 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
         error_msg = str(exc)
         print(f"[Worker | {session_id}] ❌ Task failed: {error_msg}")
 
-        # Mark session as failed with the error log
-        update_session_status(session_id, "failed", error_log=error_msg)
+        # Only mark the session as permanently failed when all retries are
+        # exhausted. During retry cycles, keep the status as "processing" so
+        # the frontend doesn't show a false failure that later disappears.
+        if self.request.retries >= self.max_retries:
+            update_session_status(session_id, "failed", error_log=error_msg)
+        else:
+            print(f"[Worker | {session_id}] ⚠️ Retry {self.request.retries + 1}/{self.max_retries} scheduled.")
 
         # Retry with exponential backoff (60s, then 120s)
         raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))

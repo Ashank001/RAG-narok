@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 try:
-    import httpx
+    import httpx  # pyrefly: ignore [missing-import]
 except ImportError:
     print("ERROR: httpx not installed. Run: pip install httpx")
     sys.exit(1)

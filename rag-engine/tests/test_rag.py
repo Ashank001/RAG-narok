@@ -15,10 +15,11 @@ Tests:
 
 import json
 from unittest.mock import patch, MagicMock, AsyncMock
-from langchain_core.documents import Document
+from langchain_core.documents import Document  # pyrefly: ignore [missing-import]
 
+# pyrefly: ignore [missing-import]
 import pytest
-from conftest import make_token
+from conftest import make_token  # pyrefly: ignore [missing-import]
 
 
 # ============================================================
@@ -63,8 +64,8 @@ def test_session_status_not_found(client, auth_headers_user_a):
 
 def test_session_status_found(client, mock_mongo, auth_headers_user_a):
     """After inserting a session document, the status endpoint must return it."""
-    # Pre-seed a session in the mock DB
-    db = mock_mongo.get_default_database()
+    # Pre-seed using the same explicit DB name that main.py's fallback uses
+    db = mock_mongo.get_database("api-gateway")
     db.sessions.insert_one({
         "sessionId": "status_test_session",
         "status": "completed",

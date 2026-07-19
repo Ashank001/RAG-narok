@@ -129,10 +129,21 @@ export default function Home() {
         method: "POST",
         body: JSON.stringify({ query: queryText }),
         signal: abortController.signal,
-      });
+        rawResponse: true, // get raw response; we check status ourselves
+      } as any);
 
       if (!response.ok) {
-        throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+        // Parse FastAPI error detail for a meaningful message
+        let errorDetail = `${response.status} ${response.statusText}`;
+        try {
+          const json = await response.clone().json();
+          if (json?.detail) errorDetail = json.detail;
+        } catch { /* body not JSON */ }
+
+        if (response.status === 401) {
+          throw new Error("Session expired or not logged in. Please log in again.");
+        }
+        throw new Error(`Backend error: ${errorDetail}`);
       }
 
       if (!response.body) {
@@ -224,7 +235,7 @@ export default function Home() {
             msg.id === assistantPlaceholder.id
               ? {
                 ...msg,
-                content: `⚠️ Connection Failed.\n\nCould not stream response from FastAPI server. Please check if the backend is running at http://127.0.0.1:8000/chat/session_123 or switch to Demo Mode.`,
+                content: `⚠️ Connection Failed.\n\n${error?.message ?? "Could not stream response from FastAPI server. Please check if the backend is running at http://127.0.0.1:8000 or switch to Demo Mode."}`,
               }
               : msg
           )
@@ -378,7 +389,7 @@ export default function Home() {
     setIsIngesting(true);
     setIngestResult(null);
 
-    const sessionId = `ingest_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const sessionId = activeSession;
 
     try {
       const response = await apiFetch("/api/ingest", {

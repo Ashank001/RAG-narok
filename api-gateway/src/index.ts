@@ -3,6 +3,9 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { connectDB } from './config/db';
 import ingestRouter from './routes/ingest';
+// Start the BullMQ worker that bridges the queue to the FastAPI Celery task
+import './workers/ingestionWorker';
+
 
 // Load environment variables
 dotenv.config();

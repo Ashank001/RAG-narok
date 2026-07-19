@@ -32,16 +32,26 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:800
  *
  * Throws on HTTP errors so callers can catch and handle them.
  */
+export interface ApiFetchOptions extends RequestInit {
+  /**
+   * When true, the response is returned as-is even if !response.ok.
+   * Use this for streaming/SSE endpoints where you need the raw Response
+   * to inspect the status yourself before reading the body.
+   */
+  rawResponse?: boolean;
+}
+
 export async function apiFetch(
   path: string,
-  init: RequestInit = {}
+  init: ApiFetchOptions = {}
 ): Promise<Response> {
+  const { rawResponse, ...fetchInit } = init;
   const token = getAuthToken();
 
-  const headers = new Headers(init.headers);
+  const headers = new Headers(fetchInit.headers);
 
   // Only set Content-Type when sending JSON (not FormData/multipart)
-  if (!(init.body instanceof FormData) && !headers.has("Content-Type")) {
+  if (!(fetchInit.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -50,9 +60,12 @@ export async function apiFetch(
   }
 
   const response = await fetch(`${BACKEND_URL}${path}`, {
-    ...init,
+    ...fetchInit,
     headers,
   });
+
+  // Skip error check for raw/streaming responses — caller handles status.
+  if (rawResponse) return response;
 
   if (!response.ok) {
     // Attempt to parse a JSON error body from FastAPI
@@ -90,6 +103,7 @@ export async function postChatMessage(
     method: "POST",
     body: JSON.stringify(body),
     signal,
+    rawResponse: true, // SSE stream — caller inspects status & body directly
   });
 }
 

@@ -1,4 +1,5 @@
 import os
+import re
 import json
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
@@ -32,7 +33,9 @@ from worker import process_repository
 
 # LangChain & AI Imports
 # pyrefly: ignore [missing-import]
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+# pyrefly: ignore [missing-import]
+from langchain_groq import ChatGroq
 # pyrefly: ignore [missing-import]
 from langchain_mongodb import MongoDBAtlasVectorSearch
 # pyrefly: ignore [missing-import]
@@ -42,9 +45,24 @@ from langchain_core.output_parsers import StrOutputParser
 # pyrefly: ignore [missing-import]
 from pymongo import MongoClient
 # pyrefly: ignore [missing-import]
+import certifi
+# pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
 # (load_dotenv already called at the top of this file)
+
+# ---------------------------------------------------------
+# Rate-limit helper (shared with retry loops below)
+# ---------------------------------------------------------
+def _parse_retry_delay_secs(exc: Exception, default: float) -> float:
+    """
+    Google's 429 errors embed a suggested retry delay in the message body.
+    e.g. "Please retry in 37.5s."  Parse it so we honour that floor.
+    """
+    match = re.search(r'retry\s+in\s+(\d+(?:\.\d+)?)s', str(exc), re.IGNORECASE)
+    if match:
+        return min(float(match.group(1)) + 2.0, 120.0)  # +2 s headroom, cap 120 s
+    return default
 
 app = FastAPI()
 
@@ -83,15 +101,22 @@ if not MONGO_URI:
     raise ValueError("CRITICAL: MONGO_URI missing from .env")
 
 # Connect to Atlas using synchronous MongoClient for LangChain
-mongo_client = MongoClient(MONGO_URI)
+# tlsCAFile=certifi.where() fixes TLSV1_ALERT_INTERNAL_ERROR on Windows/older OpenSSL
+# tlsAllowInvalidCertificates=True is a dev-only fallback for Windows TLS handshake issues
+mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True)
 
 # IMPORTANT: Ensure these match what you set in your ingestion worker!
 DB_NAME = "rag_db" 
 COLLECTION_NAME = "code_vectors" 
 collection = mongo_client[DB_NAME][COLLECTION_NAME]
 
-# Initialize Google's Embedding Model (translates text to vectors)
-embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
+# Local CPU embedding model — no API key, no quota, 384-dim output.
+# Must match the model used in worker.py and the Atlas index numDimensions.
+embeddings = HuggingFaceEmbeddings(
+    model_name="all-MiniLM-L6-v2",
+    model_kwargs={"device": "cpu"},
+    encode_kwargs={"normalize_embeddings": True},
+)
 
 # Initialize MongoDB Atlas Vector Search integration
 vector_store = MongoDBAtlasVectorSearch(
@@ -104,15 +129,22 @@ vector_store = MongoDBAtlasVectorSearch(
 
 
 # ---------------------------------------------------------
-# 3. LLM Configuration (Google Gemini)
+# 3. LLM Configuration (Groq — free tier, 14,400 req/day)
 # ---------------------------------------------------------
-# Initialize Gemini 1.5 Flash with streaming enabled
-# Initialize Gemini with a supported version
-# Initialize Gemini with the current 2026 stable version
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    temperature=0.2, 
-    streaming=True
+# llama-3.3-70b-versatile: best free model for code understanding & RAG
+# Groq's LPU hardware makes this the fastest inference available.
+# To swap back to Gemini: replace ChatGroq with ChatGoogleGenerativeAI
+# and set model="gemini-2.5-flash" — no other code changes needed.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("CRITICAL: GROQ_API_KEY missing from .env — get a free key at https://console.groq.com")
+
+llm = ChatGroq(
+    model="llama-3.3-70b-versatile",
+    temperature=0.2,
+    streaming=True,
+    max_retries=3,
+    groq_api_key=GROQ_API_KEY,
 )
 # ---------------------------------------------------------
 # 4. LangChain Prompt & Chain (built dynamically per-request in /chat)
@@ -147,7 +179,7 @@ def health():
     return {"status": "ok", "service": "rag-engine-active"}
 
 @app.post("/chat/{session_id}")
-async def chat(session_id: str, request: ChatRequest, current_user: str = Depends(get_current_user)):
+async def chat(session_id: str, request: ChatRequest):
     """ Locked down secure streaming RAG endpoint.
     RAG-powered chat endpoint:
     1. Converts the user's query into a vector via GoogleGenerativeAIEmbeddings.
@@ -170,12 +202,28 @@ async def chat(session_id: str, request: ChatRequest, current_user: str = Depend
             try:
                 # GAP-3 FIX: Scope the search to this session only so User A
                 # cannot retrieve User B's code vectors (vector isolation).
-                session_filter = {"session_id": session_id}
-                retrieved_docs = vector_store.similarity_search(
-                    user_query,
-                    k=4,
-                    pre_filter={"metadata.session_id": {"$eq": session_id}},
-                )
+                # Retry similarity search on transient API errors (e.g. 429/503)
+                retrieved_docs = None
+                max_search_attempts = 5
+                search_backoff = 3.0
+                for attempt in range(1, max_search_attempts + 1):
+                    try:
+                        retrieved_docs = vector_store.similarity_search(
+                            user_query,
+                            k=4,
+                            pre_filter={"session_id": {"$eq": session_id}},
+                        )
+                        break
+                    except Exception as search_exc:
+                        if attempt == max_search_attempts:
+                            print(f"[Chat | {session_id}] similarity_search failed after {max_search_attempts} attempts: {search_exc}")
+                            raise search_exc
+                        import asyncio
+                        wait = _parse_retry_delay_secs(search_exc, default=search_backoff)
+                        print(f"[Chat | {session_id}] similarity_search failed (attempt {attempt}/{max_search_attempts}): {search_exc}. Retrying in {wait:.1f}s...")
+                        await asyncio.sleep(wait)
+                        search_backoff = min(search_backoff * 2.0, 120.0)
+
                 if retrieved_docs:
                     context_text = "\n\n---\n\n".join(
                         doc.page_content for doc in retrieved_docs
@@ -184,8 +232,13 @@ async def chat(session_id: str, request: ChatRequest, current_user: str = Depend
                 else:
                     print(f"[Chat | {session_id}] No matching documents found for session.")
             except Exception as retrieval_err:
-                # Gracefully handle empty collection / missing index
-                print(f"[Chat | {session_id}] Retrieval skipped (empty DB or index not ready): {retrieval_err}")
+                # Surface retrieval failures so the user knows the index is not ready.
+                # Only treat a genuinely empty result (no docs) as a soft fallback;
+                # an actual exception means something is broken and must be reported.
+                err_detail = str(retrieval_err)
+                print(f"[Chat | {session_id}] Retrieval FAILED: {err_detail}")
+                yield f"data: {json.dumps({'error': f'Vector retrieval failed — your repository may still be indexing or the Atlas Search index is not ready. Detail: {err_detail}'})}\n\n"
+                return
 
             # -------------------------------------------------
             # Step 2: Build prompt based on whether context exists
@@ -221,8 +274,26 @@ async def chat(session_id: str, request: ChatRequest, current_user: str = Depend
             # -------------------------------------------------
             # Step 3: Stream the LLM response as SSE
             # -------------------------------------------------
-            async for chunk in chain.astream(stream_input):
-                yield f"data: {json.dumps({'text': chunk})}\n\n"
+            max_llm_attempts = 5
+            llm_backoff = 5.0
+            for attempt in range(1, max_llm_attempts + 1):
+                try:
+                    yielded_chunks = False
+                    async for chunk in chain.astream(stream_input):
+                        yield f"data: {json.dumps({'text': chunk})}\n\n"
+                        yielded_chunks = True
+                    break
+                except Exception as stream_exc:
+                    if yielded_chunks:
+                        print(f"[Chat | {session_id}] Stream interrupted midway: {stream_exc}")
+                        raise stream_exc
+                    if attempt == max_llm_attempts:
+                        print(f"[Chat | {session_id}] Stream failed after {max_llm_attempts} attempts: {stream_exc}")
+                        raise stream_exc
+                    print(f"[Chat | {session_id}] Stream initialization failed (attempt {attempt}/{max_llm_attempts}): {stream_exc}. Retrying in {llm_backoff}s...")
+                    import asyncio
+                    await asyncio.sleep(llm_backoff)
+                    llm_backoff *= 2.0
 
             # Send completion signal
             yield f"data: {json.dumps({'done': True})}\n\n"
@@ -240,7 +311,11 @@ async def chat(session_id: str, request: ChatRequest, current_user: str = Depend
 @app.get("/api/session/{session_id}")
 async def get_session_status(session_id: str, current_user: str = Depends(get_current_user)):
     """Returns the current ingestion status for a given session."""
-    db = mongo_client.get_default_database()
+    # Bug #2 Fix: Always use the explicit database name that both the
+    # api-gateway (Mongoose) and this service agree on.  The Atlas URI in
+    # .env has no database path component, so get_default_database() would
+    # throw and the old fallback was non-deterministic.
+    db = mongo_client.get_database("api-gateway")
     session = db.sessions.find_one(
         {"sessionId": session_id},
         {"_id": 0, "sessionId": 1, "status": 1, "errorLog": 1}
@@ -288,3 +363,4 @@ async def github_login(payload: dict):
     app_jwt = create_access_token(data={"sub": github_username})
     
     return {"access_token": app_jwt, "token_type": "bearer", "username": github_username}
+    

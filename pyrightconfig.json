@@ -1,4 +1,10 @@
 {
-  "venvPath": ".",
-  "venv": "rag-engine/.venv"
+  "venvPath": "rag-engine",
+  "venv": ".venv",
+  "extraPaths": [
+    "rag-engine",
+    "rag-engine/tests"
+  ],
+  "pythonVersion": "3.10",
+  "reportMissingModuleSource": "none"
 }
