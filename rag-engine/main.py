@@ -1,6 +1,7 @@
 import os
 import re
 import json
+from datetime import datetime, timezone, timedelta
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
@@ -25,13 +26,21 @@ GITHUB_CLIENT_SECRET = os.getenv("OAUTH_SECRET_KEY")
 
 # pyrefly: ignore [missing-import]
 # ADDED: Depends
-from fastapi import FastAPI, HTTPException, Depends 
+from fastapi import FastAPI, HTTPException, Depends, Request
 # pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 # pyrefly: ignore [missing-import]
 from fastapi.responses import JSONResponse, StreamingResponse
 # pyrefly: ignore [missing-import]
 from pydantic import BaseModel
+
+# Rate Limiting (slowapi)
+# pyrefly: ignore [missing-import]
+from slowapi import Limiter
+# pyrefly: ignore [missing-import]
+from slowapi.errors import RateLimitExceeded
+# pyrefly: ignore [missing-import]
+from jose import JWTError, jwt as jose_jwt
 
 # Celery task import
 # pyrefly: ignore [missing-import]
@@ -70,7 +79,64 @@ def _parse_retry_delay_secs(exc: Exception, default: float) -> float:
         return min(float(match.group(1)) + 2.0, 120.0)  # +2 s headroom, cap 120 s
     return default
 
+# ---------------------------------------------------------
+# Rate Limiter — per-user, keyed by GitHub username from JWT
+# ---------------------------------------------------------
+_JWT_SECRET = os.getenv("JWT_SECRET_KEY", "")
+_JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+DAILY_CHAT_LIMIT = int(os.getenv("DAILY_CHAT_LIMIT", "10"))
+
+
+def _rate_limit_key(request: Request) -> str:
+    """
+    Extract the GitHub username from the JWT Bearer token so slowapi
+    can rate-limit per authenticated user rather than per IP address.
+    Falls back to 'anonymous' for unauthenticated or malformed tokens.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip() if auth_header else ""
+    if not token:
+        return "anonymous"
+    try:
+        payload = jose_jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
+        return payload.get("sub", "anonymous")
+    except JWTError:
+        return "anonymous"
+
+
+limiter = Limiter(key_func=_rate_limit_key)
+
 app = FastAPI()
+app.state.limiter = limiter
+
+
+# ---------------------------------------------------------
+# Custom 429 handler — tells the user when the limit resets
+# ---------------------------------------------------------
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    # Daily window resets at midnight UTC
+    now = datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    reset_at = tomorrow.isoformat()
+
+    _log.warning("Rate limit exceeded", extra={
+        "user": _rate_limit_key(request),
+        "endpoint": str(request.url.path),
+        "reset_at": reset_at,
+    })
+
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "Rate limit exceeded",
+            "detail": f"You have exceeded the daily limit of {DAILY_CHAT_LIMIT} chat requests.",
+            "limit": DAILY_CHAT_LIMIT,
+            "reset_at": reset_at,
+            "message": f"Your quota resets at midnight UTC ({reset_at}). "
+                       "Please try again after that.",
+        },
+    )
 
 # ---------------------------------------------------------
 # 1. Setup CORS Middleware for Next.js
@@ -186,7 +252,8 @@ def health():
     return {"status": "ok", "service": "rag-engine-active"}
 
 @app.post("/chat/{session_id}")
-async def chat(session_id: str, request: ChatRequest):
+@limiter.limit(f"{DAILY_CHAT_LIMIT}/day")
+async def chat(request: Request, session_id: str, chat_request: ChatRequest, current_user: str = Depends(get_current_user)):
     """ Locked down secure streaming RAG endpoint.
     RAG-powered chat endpoint:
     1. Converts the user's query into a vector via GoogleGenerativeAIEmbeddings.
@@ -195,10 +262,10 @@ async def chat(session_id: str, request: ChatRequest):
     4. If the collection is empty (no repos ingested), falls back to a direct LLM call.
     5. Streams Gemini's response back to the frontend as SSE chunks.
     """
-    if not request.query or not request.query.strip():
+    if not chat_request.query or not chat_request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    user_query = request.query.strip()
+    user_query = chat_request.query.strip()
 
     async def generate_stream():
         try:

@@ -5,6 +5,9 @@ import shutil
 import tempfile
 import sys
 import time
+import json
+import urllib.request
+import urllib.error
 import git
 
 # pyrefly: ignore [missing-import]
@@ -37,6 +40,17 @@ COLLECTION_NAME = "code_vectors"
 ATLAS_INDEX_NAME = "vector_index"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Local CPU model; 384 dims; no API key or quota needed
 BATCH_SIZE = 50  # Local model has no rate limits; larger batches = faster ingestion
+
+# Repo size guard thresholds (configurable via env)
+MAX_REPO_SIZE_KB = int(os.getenv("MAX_REPO_SIZE_KB", "51200"))  # 50 MB
+MAX_FILE_COUNT_WARNING = int(os.getenv("MAX_FILE_COUNT_WARNING", "2000"))
+GITHUB_API_TIMEOUT = 8  # seconds
+
+# GitHub URL pattern — matches https://github.com/{owner}/{repo}
+_GITHUB_URL_PATTERN = re.compile(
+    r"^https://github\.com/([a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,98}[a-zA-Z0-9])?)"
+    r"/([a-zA-Z0-9._-]{1,100})(?:\.git)?/?$"
+)
 
 
 # ---------------------------------------------------------
@@ -93,6 +107,143 @@ def _rmtree_safe(path):
         shutil.rmtree(path, onexc=_rmtree_onexc)
     else:
         shutil.rmtree(path, onerror=_rmtree_onerror)
+
+
+# ---------------------------------------------------------
+# Repo Size Guard — rejects oversized repos before cloning
+# ---------------------------------------------------------
+def _check_repo_size(repo_url: str, session_id: str) -> dict:
+    """
+    Calls GitHub API GET /repos/{owner}/{repo} and enforces size limits
+    BEFORE the expensive git clone operation.
+
+    Guards:
+      - Rejects repos larger than MAX_REPO_SIZE_KB (default 50 MB / 51200 KB).
+      - Warns if the repo has more than MAX_FILE_COUNT_WARNING files (estimated
+        from the GitHub API tree, or the 'size' heuristic as fallback).
+
+    Returns the GitHub API response dict on success.
+    Raises ValueError if the repo is too large or the API call fails.
+    """
+    log = get_logger(__name__, session_id=session_id)
+
+    # Parse owner/repo from the URL
+    match = _GITHUB_URL_PATTERN.match(repo_url.strip())
+    if not match:
+        raise ValueError(
+            f"Cannot parse GitHub owner/repo from URL: {repo_url}. "
+            "Expected format: https://github.com/{{owner}}/{{repo}}"
+        )
+    owner, repo = match.group(1), match.group(2)
+
+    # Build request with optional auth
+    api_url = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "RAGnarok-Worker/1.0",
+    }
+    github_token = os.getenv("GITHUB_TOKEN")
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    log.info("Checking repo size via GitHub API", extra={
+        "owner": owner, "repo": repo, "api_url": api_url,
+    })
+
+    try:
+        req = urllib.request.Request(api_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=GITHUB_API_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as http_err:
+        if http_err.code == 404:
+            raise ValueError(
+                f"Repository not found: github.com/{owner}/{repo}. "
+                "Verify the URL is correct and the repository is publicly accessible."
+            ) from http_err
+        raise ValueError(
+            f"GitHub API error ({http_err.code}) while checking repository size. "
+            "Please try again later."
+        ) from http_err
+    except (urllib.error.URLError, TimeoutError) as net_err:
+        raise ValueError(
+            f"Could not reach GitHub API to verify repository size: {net_err}. "
+            "Please check your network connection and try again."
+        ) from net_err
+
+    # ------------------------------------------------------------------
+    # Guard 1: Reject repos that exceed the size limit
+    # ------------------------------------------------------------------
+    repo_size_kb = data.get("size", 0)
+    repo_size_mb = round(repo_size_kb / 1024, 2)
+    max_size_mb = round(MAX_REPO_SIZE_KB / 1024, 2)
+
+    log.info("Repo size retrieved", extra={
+        "size_kb": repo_size_kb, "size_mb": repo_size_mb,
+        "limit_mb": max_size_mb,
+    })
+
+    if repo_size_kb > MAX_REPO_SIZE_KB:
+        raise ValueError(
+            f"Repository too large ({repo_size_mb} MB). "
+            f"Maximum allowed size is {max_size_mb} MB. "
+            "Consider using a smaller repository or a specific branch."
+        )
+
+    # ------------------------------------------------------------------
+    # Guard 2: Warn if estimated file count is high
+    # ------------------------------------------------------------------
+    # The GitHub API doesn't return a direct file count on /repos,
+    # but we can estimate from the git tree. We'll try the tree API
+    # with ?recursive=1 and count entries, falling back to a heuristic.
+    file_count = None
+    file_count_warning = None
+    try:
+        default_branch = data.get("default_branch", "main")
+        tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1"
+        tree_req = urllib.request.Request(tree_url, headers=headers)
+        with urllib.request.urlopen(tree_req, timeout=GITHUB_API_TIMEOUT) as tree_resp:
+            tree_data = json.loads(tree_resp.read().decode())
+            if tree_data.get("truncated"):
+                # Tree is truncated = definitely >2000 files
+                file_count = MAX_FILE_COUNT_WARNING + 1
+                file_count_warning = (
+                    f"Repository has a very large number of files (tree API truncated). "
+                    f"Ingestion may take a long time."
+                )
+            else:
+                # Count only blobs (files), not trees (directories)
+                blobs = [e for e in tree_data.get("tree", []) if e.get("type") == "blob"]
+                file_count = len(blobs)
+    except Exception as tree_err:
+        log.warning("Could not fetch tree for file count estimate", extra={
+            "error": str(tree_err),
+        })
+
+    if file_count is not None and file_count > MAX_FILE_COUNT_WARNING and not file_count_warning:
+        file_count_warning = (
+            f"Repository contains approximately {file_count} files "
+            f"(threshold: {MAX_FILE_COUNT_WARNING}). Ingestion may take a long time."
+        )
+
+    if file_count_warning:
+        log.warning("High file count", extra={
+            "file_count": file_count, "warning": file_count_warning,
+        })
+        # Persist warning in session metadata so the frontend can display it
+        try:
+            db = get_sync_db()
+            db.sessions.update_one(
+                {"sessionId": session_id},
+                {"$set": {"metadata.fileCountWarning": file_count_warning}},
+            )
+        except Exception as db_err:
+            log.warning("Failed to persist file count warning", extra={"error": str(db_err)})
+
+    log.info("Repo size guard passed", extra={
+        "size_mb": repo_size_mb, "file_count": file_count,
+    })
+    return data
 
 
 # ---------------------------------------------------------
@@ -166,6 +317,11 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
 
         log.info("Cloning repository", extra={"repo_url": repo_url})
         log.debug("Temp directory", extra={"temp_path": repo_path})
+
+        # --------------------------------------------------
+        # Step 0: Repo size guard — reject oversized repos
+        # --------------------------------------------------
+        _check_repo_size(repo_url, session_id)
 
         try:
             repo = git.Repo.clone_from(
