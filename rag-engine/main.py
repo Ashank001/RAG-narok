@@ -8,6 +8,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # pyrefly: ignore [missing-import]
+from logger import get_logger
+
+# Module-level logger for startup / non-request-scoped events
+_log = get_logger(__name__)
+
+# pyrefly: ignore [missing-import]
 import httpx
 
 # ADDED: get_current_user
@@ -69,18 +75,19 @@ app = FastAPI()
 # ---------------------------------------------------------
 # 1. Setup CORS Middleware for Next.js
 # ---------------------------------------------------------
+# Read allowed origins from env (comma-separated). Falls back to localhost
+# defaults so local dev works without an explicit .env entry.
+_raw_origins = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3003,"
+    "http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:3002,http://127.0.0.1:3003",
+)
+CORS_ALLOWED_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_log.info("CORS configured", extra={"allowed_origins": CORS_ALLOWED_ORIGINS})
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3002",
-        "http://localhost:3003",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:3002",
-        "http://127.0.0.1:3003",
-    ],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -216,11 +223,11 @@ async def chat(session_id: str, request: ChatRequest):
                         break
                     except Exception as search_exc:
                         if attempt == max_search_attempts:
-                            print(f"[Chat | {session_id}] similarity_search failed after {max_search_attempts} attempts: {search_exc}")
+                            _log.error("similarity_search failed after max attempts", extra={"session_id": session_id, "attempts": max_search_attempts, "error": str(search_exc)})
                             raise search_exc
                         import asyncio
                         wait = _parse_retry_delay_secs(search_exc, default=search_backoff)
-                        print(f"[Chat | {session_id}] similarity_search failed (attempt {attempt}/{max_search_attempts}): {search_exc}. Retrying in {wait:.1f}s...")
+                        _log.warning("similarity_search failed, retrying", extra={"session_id": session_id, "attempt": attempt, "max_attempts": max_search_attempts, "retry_in_secs": round(wait, 1)})
                         await asyncio.sleep(wait)
                         search_backoff = min(search_backoff * 2.0, 120.0)
 
@@ -228,15 +235,12 @@ async def chat(session_id: str, request: ChatRequest):
                     context_text = "\n\n---\n\n".join(
                         doc.page_content for doc in retrieved_docs
                     )
-                    print(f"[Chat | {session_id}] Retrieved {len(retrieved_docs)} chunks for query.")
+                    _log.info("Context retrieved", extra={"session_id": session_id, "chunk_count": len(retrieved_docs)})
                 else:
-                    print(f"[Chat | {session_id}] No matching documents found for session.")
+                    _log.info("No matching documents for session", extra={"session_id": session_id})
             except Exception as retrieval_err:
-                # Surface retrieval failures so the user knows the index is not ready.
-                # Only treat a genuinely empty result (no docs) as a soft fallback;
-                # an actual exception means something is broken and must be reported.
                 err_detail = str(retrieval_err)
-                print(f"[Chat | {session_id}] Retrieval FAILED: {err_detail}")
+                _log.error("Vector retrieval failed", extra={"session_id": session_id, "error": err_detail})
                 yield f"data: {json.dumps({'error': f'Vector retrieval failed — your repository may still be indexing or the Atlas Search index is not ready. Detail: {err_detail}'})}\n\n"
                 return
 
@@ -285,12 +289,12 @@ async def chat(session_id: str, request: ChatRequest):
                     break
                 except Exception as stream_exc:
                     if yielded_chunks:
-                        print(f"[Chat | {session_id}] Stream interrupted midway: {stream_exc}")
+                        _log.error("Stream interrupted midway", extra={"session_id": session_id, "error": str(stream_exc)})
                         raise stream_exc
                     if attempt == max_llm_attempts:
-                        print(f"[Chat | {session_id}] Stream failed after {max_llm_attempts} attempts: {stream_exc}")
+                        _log.error("Stream failed after max attempts", extra={"session_id": session_id, "attempts": max_llm_attempts, "error": str(stream_exc)})
                         raise stream_exc
-                    print(f"[Chat | {session_id}] Stream initialization failed (attempt {attempt}/{max_llm_attempts}): {stream_exc}. Retrying in {llm_backoff}s...")
+                    _log.warning("Stream init failed, retrying", extra={"session_id": session_id, "attempt": attempt, "max_attempts": max_llm_attempts, "retry_in_secs": llm_backoff})
                     import asyncio
                     await asyncio.sleep(llm_backoff)
                     llm_backoff *= 2.0
@@ -299,7 +303,7 @@ async def chat(session_id: str, request: ChatRequest):
             yield f"data: {json.dumps({'done': True})}\n\n"
 
         except Exception as e:
-            print(f"[Chat | {session_id}] Streaming Error: {e}")
+            _log.error("Streaming error", extra={"session_id": session_id, "error": str(e)})
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(generate_stream(), media_type="text/event-stream")

@@ -2,6 +2,7 @@ import { Router, Request, Response, RequestHandler } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { Session } from '../models/Session';
 import { ingestionQueue } from '../config/queue';
+import { validateGithubUrl } from '../middleware/validateGithubUrl';
 
 const router = Router();
 
@@ -76,7 +77,7 @@ const statusHandler: RequestHandler = async (req: Request, res: Response): Promi
   }
 };
 
-router.post('/ingest', ingestHandler);
+router.post('/ingest', validateGithubUrl, ingestHandler);
 router.get('/status/:sessionId', statusHandler);
 
 export default router;

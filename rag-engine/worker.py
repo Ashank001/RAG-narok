@@ -11,6 +11,11 @@ import git
 from config import celery_app, get_sync_db, get_sync_collection
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
+# pyrefly: ignore [missing-import]
+from logger import get_logger
+
+# Module-level logger (no session bound at import time)
+_log = get_logger(__name__)
 
 # LangChain Imports
 # pyrefly: ignore [missing-import]
@@ -122,12 +127,13 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
     Synchronous ingestion pipeline:
     1. Clones the repository to a temporary OS-safe directory using GitLoader.
     2. Splits loaded files into chunks using RecursiveCharacterTextSplitter.
-    3. Generates vector embeddings using GoogleGenerativeAIEmbeddings (gemini-embedding-001).
+    3. Generates vector embeddings using HuggingFaceEmbeddings (all-MiniLM-L6-v2).
     4. Uploads embedded documents to MongoDB Atlas Vector Search (rag_db.code_vectors).
     5. Cleans up the temporary clone directory.
 
     Returns a summary dict with chunk and document counts.
     """
+    log = get_logger(__name__, session_id=session_id)
     # Create a temporary directory using the OS temp path (works on Windows, Linux, macOS)
     repo_path = tempfile.mkdtemp(prefix=f"ragnarok_{session_id}_")
 
@@ -158,8 +164,8 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             base = _os.path.basename(file_path).lower()
             return ext in SOURCE_CODE_EXTENSIONS or base in SOURCE_CODE_EXTENSIONS
 
-        print(f"[Worker | {session_id}] Cloning repository: {repo_url}")
-        print(f"[Worker | {session_id}] Temp directory: {repo_path}")
+        log.info("Cloning repository", extra={"repo_url": repo_url})
+        log.debug("Temp directory", extra={"temp_path": repo_path})
 
         try:
             repo = git.Repo.clone_from(
@@ -168,7 +174,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 depth=1
             )
             default_branch = repo.active_branch.name
-            print(f"[Worker | {session_id}] Successfully cloned shallow copy (depth=1) of branch: {default_branch}")
+            log.info("Repository cloned", extra={"branch": default_branch, "depth": 1})
             
             loader = GitLoader(
                 repo_path=repo_path,
@@ -177,10 +183,10 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             )
             docs = loader.load()
         except Exception as clone_err:
-            print(f"[Worker | {session_id}] ❌ Clone failed: {clone_err}")
+            log.error("Clone failed", extra={"error": str(clone_err)})
             raise clone_err
 
-        print(f"[Worker | {session_id}] Loaded {len(docs)} source files (binaries/lockfiles excluded).")
+        log.info("Source files loaded", extra={"file_count": len(docs)})
 
         if not docs:
             raise ValueError("Repository cloned but contained no loadable documents.")
@@ -193,7 +199,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             chunk_overlap=200,
         )
         chunks = splitter.split_documents(docs)
-        print(f"[Worker | {session_id}] Split into {len(chunks)} text chunks.")
+        log.info("Documents split into chunks", extra={"chunk_count": len(chunks)})
 
         if not chunks:
             raise ValueError("Document splitting produced zero chunks.")
@@ -206,7 +212,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 3: Initialize embedding model
         # --------------------------------------------------
-        print(f"[Worker | {session_id}] Initializing local embedding model: {EMBEDDING_MODEL}")
+        log.info("Initializing embedding model", extra={"model": EMBEDDING_MODEL})
         embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL,
             # Run on CPU; set device="cuda" if you have a GPU
@@ -217,7 +223,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 4: Upload to MongoDB Atlas Vector Search
         # --------------------------------------------------
-        print(f"[Worker | {session_id}] Connecting to MongoDB Atlas: {DB_NAME}.{COLLECTION_NAME}")
+        log.info("Connecting to MongoDB Atlas", extra={"db": DB_NAME, "collection": COLLECTION_NAME})
         collection = get_sync_collection(DB_NAME, COLLECTION_NAME)
 
         vector_store = MongoDBAtlasVectorSearch(
@@ -234,7 +240,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             batch = chunks[i : i + BATCH_SIZE]
             batch_num = (i // BATCH_SIZE) + 1
             total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
-            print(f"[Worker | {session_id}] Embedding & uploading batch {batch_num}/{total_batches} ({len(batch)} chunks)...")
+            log.info("Embedding and uploading batch", extra={"batch": batch_num, "total_batches": total_batches, "chunk_count": len(batch)})
 
             max_batch_retries = 8
             backoff_delay = 5.0
@@ -247,23 +253,23 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                     # Daily quota is permanent until midnight — fail fast with a clear message.
                     if _is_daily_quota_exhausted(exc):
                         msg = (
-                            f"[Worker | {session_id}] Daily embedding quota exhausted on batch {batch_num}. "
+                            f"Daily embedding quota exhausted on batch {batch_num}. "
                             "Switch to a new GOOGLE_API_KEY or wait until the quota resets at midnight Pacific."
                         )
-                        print(msg)
+                        log.error(msg, extra={"batch": batch_num})
                         raise RuntimeError(msg) from exc
                     if attempt == max_batch_retries:
-                        print(f"[Worker | {session_id}] Batch {batch_num} failed after {max_batch_retries} attempts: {exc}")
+                        log.error("Batch upload failed — max retries exhausted", extra={"batch": batch_num, "attempts": max_batch_retries, "error": str(exc)})
                         raise exc
                     # Per-minute rate limit — honour the server-suggested retryDelay.
                     wait = _parse_retry_delay_secs(exc, default=backoff_delay)
-                    print(f"[Worker | {session_id}] Batch {batch_num} failed (attempt {attempt}/{max_batch_retries}): rate limited. Retrying in {wait:.1f}s...")
+                    log.warning("Batch rate limited, retrying", extra={"batch": batch_num, "attempt": attempt, "max_retries": max_batch_retries, "retry_in_secs": round(wait, 1)})
                     time.sleep(wait)
                     backoff_delay = min(backoff_delay * 2.0, 120.0)
 
             # No sleep needed — local model has no API rate limits
 
-        print(f"[Worker | {session_id}] ✅ Successfully uploaded {total_uploaded} vectors to Atlas.")
+        log.info("Vectors uploaded to Atlas", extra={"vectors_uploaded": total_uploaded})
 
         return {
             "files_loaded": len(docs),
@@ -278,9 +284,9 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         if os.path.exists(repo_path):
             try:
                 _rmtree_safe(repo_path)
-                print(f"[Worker | {session_id}] Cleaned up temp directory: {repo_path}")
+                log.debug("Temp directory cleaned up", extra={"temp_path": repo_path})
             except Exception as cleanup_err:
-                print(f"[Worker | {session_id}] ⚠️ Failed to clean up {repo_path}: {cleanup_err}")
+                log.warning("Failed to clean up temp directory", extra={"temp_path": repo_path, "error": str(cleanup_err)})
 
 
 # ---------------------------------------------------------
@@ -309,9 +315,10 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
             f"repositoryUrl='{repo_url}' in payload='{payload}'"
         )
 
+    log = get_logger(__name__, session_id=session_id)
     # Update session status to 'processing'
     update_session_status(session_id, "processing")
-    print(f"[Worker | {session_id}] ▶ Task started for: {repo_url}")
+    log.info("Task started", extra={"repo_url": repo_url})
 
     try:
         # Execute the full ingestion pipeline
@@ -319,12 +326,12 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
 
         # Mark session as completed
         update_session_status(session_id, "completed")
-        print(f"[Worker | {session_id}] ✅ Task completed: {result}")
+        log.info("Task completed", extra={"result": result})
         return result
 
     except Exception as exc:
         error_msg = str(exc)
-        print(f"[Worker | {session_id}] ❌ Task failed: {error_msg}")
+        log.error("Task failed", extra={"error": error_msg})
 
         # Only mark the session as permanently failed when all retries are
         # exhausted. During retry cycles, keep the status as "processing" so
@@ -332,7 +339,7 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
         if self.request.retries >= self.max_retries:
             update_session_status(session_id, "failed", error_log=error_msg)
         else:
-            print(f"[Worker | {session_id}] ⚠️ Retry {self.request.retries + 1}/{self.max_retries} scheduled.")
+            log.warning("Retry scheduled", extra={"retry": self.request.retries + 1, "max_retries": self.max_retries})
 
         # Retry with exponential backoff (60s, then 120s)
         raise self.retry(exc=exc, countdown=60 * (self.request.retries + 1))

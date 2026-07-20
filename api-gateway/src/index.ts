@@ -7,14 +7,28 @@ import ingestRouter from './routes/ingest';
 import './workers/ingestionWorker';
 
 
-// Load environment variables
+// Load environment variables first so CORS_ORIGINS is available
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable Cross-Origin Resource Sharing (CORS)
-app.use(cors());
+// ---------------------------------------------------------
+// CORS — origins read from CORS_ORIGINS env var
+// Format: comma-separated list, e.g. "http://localhost:3000,https://app.example.com"
+// Falls back to localhost:3000 for local development.
+// ---------------------------------------------------------
+const allowedOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
 
 // Middleware for parsing JSON payloads
 app.use(express.json());
