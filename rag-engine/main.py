@@ -5,8 +5,13 @@ from datetime import datetime, timezone, timedelta
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
-# Load .env FIRST — before any os.getenv() call
+# Load .env FIRST — before any os.getenv() call and before heavy C-extension imports
 load_dotenv()
+
+# Ensure thread limits are set even if .env is missing the keys.
+# Must happen BEFORE numpy/torch/OpenBLAS are imported.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 # pyrefly: ignore [missing-import]
 from logger import get_logger
@@ -61,8 +66,10 @@ from langchain_core.output_parsers import StrOutputParser
 from pymongo import MongoClient
 # pyrefly: ignore [missing-import]
 import certifi
+
+# Cross-Encoder for reranking retrieved chunks
 # pyrefly: ignore [missing-import]
-from dotenv import load_dotenv
+from sentence_transformers import CrossEncoder
 
 # (load_dotenv already called at the top of this file)
 
@@ -183,10 +190,11 @@ DB_NAME = "rag_db"
 COLLECTION_NAME = "code_vectors" 
 collection = mongo_client[DB_NAME][COLLECTION_NAME]
 
-# Local CPU embedding model — no API key, no quota, 384-dim output.
-# Must match the model used in worker.py and the Atlas index numDimensions.
+# Local CPU embedding model — no API key, no quota, 768-dim output.
+# BAAI/bge-base-en-v1.5 significantly outperforms MiniLM on code retrieval.
+# Must match the model used in worker.py and the Atlas index numDimensions (768).
 embeddings = HuggingFaceEmbeddings(
-    model_name="all-MiniLM-L6-v2",
+    model_name="BAAI/bge-base-en-v1.5",
     model_kwargs={"device": "cpu"},
     encode_kwargs={"normalize_embeddings": True},
 )
@@ -199,6 +207,52 @@ vector_store = MongoDBAtlasVectorSearch(
     text_key="text",
     embedding_key="embedding",
 )
+
+# ---------------------------------------------------------
+# Cross-Encoder Reranker (local CPU, no API calls)
+# ---------------------------------------------------------
+# After the bi-encoder retrieves top-K candidates, the cross-encoder
+# scores each (query, chunk) pair jointly for much higher precision.
+# Model: ms-marco-MiniLM-L-6-v2 — fast, accurate, runs on CPU.
+RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANK_TOP_K = 5  # Keep top 5 after reranking
+RETRIEVAL_TOP_K = 20  # Retrieve top 20 candidates for reranking
+
+_log.info("Loading cross-encoder reranker", extra={"model": RERANK_MODEL_NAME})
+reranker = CrossEncoder(RERANK_MODEL_NAME, device="cpu")
+_log.info("Cross-encoder reranker loaded")
+
+
+def rerank_documents(query: str, documents: list, top_k: int = RERANK_TOP_K) -> list:
+    """
+    Reranks retrieved documents using the cross-encoder.
+
+    Args:
+        query:     The user's search query.
+        documents: List of LangChain Document objects from similarity_search.
+        top_k:     Number of top-scoring documents to keep.
+
+    Returns:
+        The top_k documents sorted by cross-encoder relevance score (descending).
+    """
+    if not documents:
+        return []
+
+    # Build (query, passage) pairs for the cross-encoder
+    pairs = [(query, doc.page_content) for doc in documents]
+
+    # Score all pairs in one batch (much faster than one-by-one)
+    scores = reranker.predict(pairs)
+
+    # Attach scores and sort descending
+    scored_docs = sorted(
+        zip(documents, scores),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    # Return only the top_k documents
+    return [doc for doc, _score in scored_docs[:top_k]]
 
 
 # ---------------------------------------------------------
@@ -284,7 +338,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                     try:
                         retrieved_docs = vector_store.similarity_search(
                             user_query,
-                            k=4,
+                            k=RETRIEVAL_TOP_K,
                             pre_filter={"session_id": {"$eq": session_id}},
                         )
                         break
@@ -299,10 +353,24 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                         search_backoff = min(search_backoff * 2.0, 120.0)
 
                 if retrieved_docs:
+                    # -----------------------------------------
+                    # Step 1b: Rerank with cross-encoder
+                    # -----------------------------------------
+                    _log.info("Reranking candidates", extra={
+                        "session_id": session_id,
+                        "candidates": len(retrieved_docs),
+                        "rerank_top_k": RERANK_TOP_K,
+                    })
+                    reranked_docs = rerank_documents(user_query, retrieved_docs, top_k=RERANK_TOP_K)
+
                     context_text = "\n\n---\n\n".join(
-                        doc.page_content for doc in retrieved_docs
+                        doc.page_content for doc in reranked_docs
                     )
-                    _log.info("Context retrieved", extra={"session_id": session_id, "chunk_count": len(retrieved_docs)})
+                    _log.info("Context retrieved and reranked", extra={
+                        "session_id": session_id,
+                        "candidates_retrieved": len(retrieved_docs),
+                        "chunks_after_rerank": len(reranked_docs),
+                    })
                 else:
                     _log.info("No matching documents for session", extra={"session_id": session_id})
             except Exception as retrieval_err:

@@ -8,19 +8,30 @@ import time
 import json
 import urllib.request
 import urllib.error
+
+# pyrefly: ignore [missing-import]
+from dotenv import load_dotenv
+
+# Load .env FIRST — BEFORE any heavy C-extension imports (torch/numpy/OpenBLAS).
+# OPENBLAS_NUM_THREADS and OMP_NUM_THREADS must be in the process environment
+# before numpy is imported, or OpenBLAS will try to allocate too many threads.
+load_dotenv()
+
+# Ensure thread limits are set even if .env is missing the keys
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import git
 
 # pyrefly: ignore [missing-import]
 from config import celery_app, get_sync_db, get_sync_collection
-# pyrefly: ignore [missing-import]
-from dotenv import load_dotenv
 # pyrefly: ignore [missing-import]
 from logger import get_logger
 
 # Module-level logger (no session bound at import time)
 _log = get_logger(__name__)
 
-# LangChain Imports
+# LangChain Imports — AFTER load_dotenv() so thread limits are active
 # pyrefly: ignore [missing-import]
 from langchain_community.document_loaders import GitLoader
 # pyrefly: ignore [missing-import]
@@ -30,15 +41,13 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # pyrefly: ignore [missing-import]
 from langchain_mongodb import MongoDBAtlasVectorSearch
 
-load_dotenv()
-
 # ---------------------------------------------------------
 # Constants
 # ---------------------------------------------------------
 DB_NAME = "rag_db"
 COLLECTION_NAME = "code_vectors"
 ATLAS_INDEX_NAME = "vector_index"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Local CPU model; 384 dims; no API key or quota needed
+EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"  # Local CPU model; 768 dims; no API key or quota needed
 BATCH_SIZE = 50  # Local model has no rate limits; larger batches = faster ingestion
 
 # Repo size guard thresholds (configurable via env)
@@ -278,7 +287,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
     Synchronous ingestion pipeline:
     1. Clones the repository to a temporary OS-safe directory using GitLoader.
     2. Splits loaded files into chunks using RecursiveCharacterTextSplitter.
-    3. Generates vector embeddings using HuggingFaceEmbeddings (all-MiniLM-L6-v2).
+    3. Generates vector embeddings using HuggingFaceEmbeddings (BAAI/bge-base-en-v1.5, 768 dims).
     4. Uploads embedded documents to MongoDB Atlas Vector Search (rag_db.code_vectors).
     5. Cleans up the temporary clone directory.
 
