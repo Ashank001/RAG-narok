@@ -1,0 +1,96 @@
+name: CI Workflow
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  rag-engine-tests:
+    name: RAG Engine Tests (Python)
+    runs-on: ubuntu-latest
+    
+    services:
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: ./rag-engine/requirements.txt
+
+      - name: Install dependencies
+        working-directory: ./rag-engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov mongomock
+
+      - name: Run Pytest with Coverage
+        working-directory: ./rag-engine
+        # Set environment variables for tests (e.g., dummy keys to pass validation)
+        env:
+          REDIS_URL: redis://localhost:6379/0
+          MONGO_URI: mongodb://localhost:27017
+          GROQ_API_KEY: dummy-key-for-tests
+          JWT_SECRET_KEY: dummy-secret
+        run: |
+          pytest --cov=. --cov-report=xml --cov-report=term --cov-fail-under=70 | tee pytest-coverage.txt
+
+      - name: Post Coverage Summary to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: MishaKav/pytest-coverage-comment@main
+        with:
+          pytest-coverage-path: ./rag-engine/pytest-coverage.txt
+          title: "🐍 Python Coverage Report"
+          badge-title: "Coverage"
+          hide-badge: false
+          hide-report: false
+          create-new-comment: false
+          hide-comment: false
+          coverage-path-prefix: "rag-engine/"
+
+  api-gateway-tests:
+    name: API Gateway Tests (Node.js)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+          cache-dependency-path: ./api-gateway/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./api-gateway
+        run: npm ci
+
+      - name: Run TypeScript type checking
+        working-directory: ./api-gateway
+        run: npx tsc --noEmit
+
+      - name: Run Jest tests
+        working-directory: ./api-gateway
+        run: npm test --if-present
