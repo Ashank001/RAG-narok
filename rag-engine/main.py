@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import hashlib
+import redis
 from datetime import datetime, timezone, timedelta
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
@@ -180,6 +182,9 @@ MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise ValueError("CRITICAL: MONGO_URI missing from .env")
 
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+
 # Connect to Atlas using synchronous MongoClient for LangChain
 # tlsCAFile=certifi.where() fixes TLSV1_ALERT_INTERNAL_ERROR on Windows/older OpenSSL
 # tlsAllowInvalidCertificates=True is a dev-only fallback for Windows TLS handshake issues
@@ -320,6 +325,24 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
     user_query = chat_request.query.strip()
+    normalized_query = " ".join(user_query.lower().split())
+
+    # -------------------------------------------------
+    # LLM RESPONSE CACHE (Check)
+    # -------------------------------------------------
+    cache_hash = hashlib.sha256(f"{session_id}:{normalized_query}".encode("utf-8")).hexdigest()
+    cache_key = f"chat_cache:{cache_hash}"
+
+    try:
+        cached_response = redis_client.get(cache_key)
+        if cached_response:
+            _log.info("Cache hit", extra={"session_id": session_id})
+            async def stream_cache():
+                yield f"data: {json.dumps({'text': cached_response})}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+            return StreamingResponse(stream_cache(), media_type="text/event-stream")
+    except Exception as e:
+        _log.warning("Cache check failed", extra={"session_id": session_id, "error": str(e)})
 
     async def generate_stream():
         try:
@@ -380,6 +403,20 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                 return
 
             # -------------------------------------------------
+            # CONVERSATION MEMORY (Retrieve)
+            # -------------------------------------------------
+            history_key = f"chat_history:{session_id}"
+            history_context = ""
+            try:
+                # LPUSH pushes to head, so index 0 is newest. Reversing it gives chronological order.
+                raw_history = redis_client.lrange(history_key, 0, 5)
+                if raw_history:
+                    chronological_history = reversed(raw_history)
+                    history_context = "\nConversation History:\n" + "\n".join(chronological_history) + "\n"
+            except Exception as e:
+                _log.warning("History retrieval failed", extra={"session_id": session_id, "error": str(e)})
+
+            # -------------------------------------------------
             # Step 2: Build prompt based on whether context exists
             # -------------------------------------------------
             if context_text:
@@ -391,11 +428,11 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                      "Reference specific file names, functions, or patterns from the context when relevant. "
                      "If the answer is not contained within the provided context, state that clearly. "
                      "Do not hallucinate code that isn't there.\n\n"
-                     "Codebase Context:\n{context}"),
+                     "Codebase Context:\n{context}\n{history}"),
                     ("human", "{question}")
                 ])
                 chain = chat_prompt | llm | StrOutputParser()
-                stream_input = {"context": context_text, "question": user_query}
+                stream_input = {"context": context_text, "history": history_context, "question": user_query}
             else:
                 # Fallback mode: no context available, answer directly
                 chat_prompt = ChatPromptTemplate.from_messages([
@@ -404,21 +441,24 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                      "No codebase has been ingested yet, so you have no repository context. "
                      "Answer the user's question using your general knowledge. "
                      "If the question seems to be about a specific codebase, suggest they ingest "
-                     "a repository first using the Ingest Repository panel."),
+                     "a repository first using the Ingest Repository panel.\n{history}"),
                     ("human", "{question}")
                 ])
                 chain = chat_prompt | llm | StrOutputParser()
-                stream_input = {"question": user_query}
+                stream_input = {"history": history_context, "question": user_query}
 
             # -------------------------------------------------
             # Step 3: Stream the LLM response as SSE
             # -------------------------------------------------
             max_llm_attempts = 5
             llm_backoff = 5.0
+            full_response = []
             for attempt in range(1, max_llm_attempts + 1):
                 try:
                     yielded_chunks = False
+                    full_response = []
                     async for chunk in chain.astream(stream_input):
+                        full_response.append(chunk)
                         yield f"data: {json.dumps({'text': chunk})}\n\n"
                         yielded_chunks = True
                     break
@@ -433,6 +473,25 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                     import asyncio
                     await asyncio.sleep(llm_backoff)
                     llm_backoff *= 2.0
+
+            # -------------------------------------------------
+            # SAVE CACHE & CONVERSATION HISTORY
+            # -------------------------------------------------
+            final_answer = "".join(full_response)
+            try:
+                if final_answer:
+                    # Cache response for 1 hour
+                    redis_client.setex(cache_key, 3600, final_answer)
+                
+                # Push User then Assistant so reverse order is chronological
+                redis_client.lpush(history_key, f"User: {user_query}")
+                redis_client.lpush(history_key, f"Assistant: {final_answer}")
+                # Keep only last 6 messages
+                redis_client.ltrim(history_key, 0, 5)
+                # Auto-expire after 2 hours
+                redis_client.expire(history_key, 7200)
+            except Exception as e:
+                _log.warning("Failed to save cache or history", extra={"session_id": session_id, "error": str(e)})
 
             # Send completion signal
             yield f"data: {json.dumps({'done': True})}\n\n"
