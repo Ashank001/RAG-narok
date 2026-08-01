@@ -56,17 +56,17 @@ const GITHUB_API_TIMEOUT_MS = 8_000;
 // ---------------------------------------------------------------------------
 // Helper — build GitHub API request headers
 // ---------------------------------------------------------------------------
-function buildGithubHeaders(userAuthHeader?: string): Record<string, string> {
+function buildGithubHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
     'User-Agent': 'RAGnarok-API-Gateway/1.0',
   };
 
-  // Prefer a token forwarded by the client; fall back to the server-level PAT.
-  const token =
-    (userAuthHeader?.startsWith('Bearer ') ? userAuthHeader.slice(7) : undefined) ??
-    process.env.GITHUB_TOKEN;
+  // Only use the server-level GitHub PAT.
+  // The user's Authorization header contains a RAGnarok JWT (not a GitHub
+  // token), so forwarding it to GitHub would cause a 401/403.
+  const token = process.env.GITHUB_TOKEN;
 
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
@@ -113,8 +113,7 @@ export const validateGithubUrl: RequestHandler = async (
   // Layer 2: Existence check via GitHub REST API
   // ------------------------------------------------------------------
   const apiUrl = `${GITHUB_API_BASE}/repos/${owner}/${repo}`;
-  const userAuthHeader = req.headers.authorization;
-  const headers = buildGithubHeaders(userAuthHeader);
+  const headers = buildGithubHeaders();
 
   let githubData: Record<string, unknown>;
   try {
@@ -171,19 +170,16 @@ export const validateGithubUrl: RequestHandler = async (
   const isPrivate = Boolean(githubData.private);
 
   if (isPrivate) {
-    // A token must have been supplied (either from the client or env) for us
-    // to have received a 200 response from GitHub at all.  However, if the
-    // server-level GITHUB_TOKEN is what authenticated, we still reject —
-    // we don't want to grant access on behalf of a server credential when the
-    // actual user hasn't authenticated.
-    const hasUserToken = userAuthHeader?.startsWith('Bearer ');
+    // Private repos require a server-level GITHUB_TOKEN to access.
+    // If we got here without one, GitHub would have returned 404 above,
+    // but guard explicitly just in case.
     const hasEnvToken = Boolean(process.env.GITHUB_TOKEN);
 
-    if (!hasUserToken && !hasEnvToken) {
+    if (!hasEnvToken) {
       res.status(403).json({
         error:
           `Repository github.com/${owner}/${repo} is private. ` +
-          'Provide a GitHub personal access token via the Authorization header to ingest private repositories.',
+          'Configure a GITHUB_TOKEN on the server to ingest private repositories.',
       });
       return;
     }

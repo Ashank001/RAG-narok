@@ -503,6 +503,24 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
     return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
 # ---------------------------------------------------------
+# Ingestion API (Triggered by api-gateway BullMQ worker)
+# ---------------------------------------------------------
+@app.post("/api/ingest", status_code=202)
+async def trigger_ingestion(request: IngestRequest, current_user: str = Depends(get_current_user)):
+    """
+    Receives an ingestion request from the api-gateway's BullMQ worker 
+    and dispatches it to the Celery task queue.
+    """
+    _log.info("Dispatching Celery task", extra={"session_id": request.sessionId, "repo": request.repositoryUrl})
+    process_repository.delay(
+        payload={
+            "sessionId": request.sessionId,
+            "repositoryUrl": request.repositoryUrl
+        }
+    )
+    return {"message": "Ingestion started", "sessionId": request.sessionId}
+
+# ---------------------------------------------------------
 # GAP-2 FIX: Session status polling endpoint
 # Frontend polls this to know when Celery ingestion finishes.
 # ---------------------------------------------------------

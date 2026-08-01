@@ -22,8 +22,10 @@ services:
       # Override the .env file so Node connects to the Docker Redis container
       - REDIS_HOST=redis
       - REDIS_URL=redis://redis:6379
+      - RAG_ENGINE_URL=http://rag-engine:8000
+
     ports:
-      - "3000:3000"
+      - "3001:3001"
     depends_on:
       - redis
     command: sh -c "npm install && npm run dev"

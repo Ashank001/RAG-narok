@@ -7,7 +7,7 @@ dotenv.config();
 
 const redisHost = process.env.REDIS_HOST || '127.0.0.1';
 const redisPort = parseInt(process.env.REDIS_PORT || '6379', 10);
-const ragEngineUrl = process.env.RAG_ENGINE_URL || 'http://localhost:8000';
+const ragEngineUrl = process.env.RAG_ENGINE_URL || 'http://rag-engine:8000';
 const internalApiKey = process.env.INTERNAL_API_KEY || '';
 
 interface IngestJobData {
