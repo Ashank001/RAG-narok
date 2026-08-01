@@ -40,22 +40,22 @@ RAGnarok is a **polyglot microservices system** across five independent services
        │ Celery Task
 ┌──────▼──────────────────────────────────────────────────────────┐
 │              Python FastAPI + Celery  (Port 8000)               │
-│                                                                  │
-│  ┌─────────────────────┐    ┌──────────────────────────────┐   │
-│  │   Celery Worker     │    │      FastAPI Endpoints        │   │
-│  │                     │    │                              │   │
-│  │ 1. Clone repo       │    │ POST /chat/{session_id}      │   │
-│  │ 2. Filter sources   │    │   · Embed query (local)      │   │
-│  │ 3. Chunk code       │    │   · Vector search Atlas      │   │
-│  │ 4. Embed locally    │    │   · Rerank top-20 → top-5    │   │
-│  │ 5. Store vectors    │    │   · Stream via SSE (Groq)    │   │
-│  └─────────────────────┘    └──────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────┐    ┌──────────────────────────────┐    │
+│  │   Celery Worker     │    │      FastAPI Endpoints       │    │
+│  │                     │    │                              │    │
+│  │ 1. Clone repo       │    │ POST /chat/{session_id}      │    │
+│  │ 2. Filter sources   │    │   · Embed query (local)      │    │
+│  │ 3. Chunk code       │    │   · Vector search Atlas      │    │
+│  │ 4. Embed locally    │    │   · Rerank top-20 → top-5    │    │
+│  │ 5. Store vectors    │    │   · Stream via SSE (Groq)    │    │
+│  └─────────────────────┘    └──────────────────────────────┘    │
 └─────────────────────────────────────┬───────────────────────────┘
                                       │ Vector Search
                               ┌───────▼──────────┐
-                              │  MongoDB Atlas    │
-                              │  Vector Search    │
-                              │  (code_vectors)   │
+                              │  MongoDB Atlas   │
+                              │  Vector Search   │
+                              │  (code_vectors)  │
                               └──────────────────┘
 ```
 
