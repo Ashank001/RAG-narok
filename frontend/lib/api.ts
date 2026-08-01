@@ -2,36 +2,24 @@
  * lib/api.ts
  * ----------
  * A typed fetch wrapper that automatically attaches the stored JWT to
- * every request that goes to the FastAPI backend.
+ * every request that goes to the backend.
  *
- * Usage:
- *   import { apiFetch } from "@/lib/api";
- *
- *   // Streaming chat (SSE)
- *   const response = await apiFetch(`/chat/${sessionId}`, {
- *     method: "POST",
- *     body: JSON.stringify({ query }),
- *   });
- *
- *   // Ingestion
- *   const data = await apiFetch("/api/ingest", {
- *     method: "POST",
- *     body: JSON.stringify({ repositoryUrl }),
- *   });
+ * Two backend services:
+ *   - RAG Engine (FastAPI):  localhost:8000 — chat, auth, sessions
+ *   - Ingest Service:        localhost:3001 — repository ingestion
  */
 
 import { getAuthToken } from "./auth";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+const INGEST_BACKEND_URL =
+  process.env.NEXT_PUBLIC_INGEST_BACKEND_URL ?? "http://localhost:3001";
 
-/**
- * Wrapper around the native fetch API.
- * Automatically adds:
- *  - `Content-Type: application/json` (unless body is FormData)
- *  - `Authorization: Bearer <token>` if a token exists in localStorage
- *
- * Throws on HTTP errors so callers can catch and handle them.
- */
+// ---------------------------------------------------------------------------
+// Core fetch wrapper
+// ---------------------------------------------------------------------------
+
 export interface ApiFetchOptions extends RequestInit {
   /**
    * When true, the response is returned as-is even if !response.ok.
@@ -83,7 +71,51 @@ export async function apiFetch(
 }
 
 // ---------------------------------------------------------------------------
-// Typed helpers for specific endpoints
+// Ingest service fetch wrapper (port 3001)
+// ---------------------------------------------------------------------------
+
+export async function ingestFetch(
+  path: string,
+  init: ApiFetchOptions = {}
+): Promise<Response> {
+  const { rawResponse, ...fetchInit } = init;
+  const token = getAuthToken();
+
+  const headers = new Headers(fetchInit.headers);
+
+  if (!(fetchInit.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const response = await fetch(`${INGEST_BACKEND_URL}${path}`, {
+    ...fetchInit,
+    headers,
+  });
+
+  if (rawResponse) return response;
+
+  if (!response.ok) {
+    let errorDetail = `${response.status} ${response.statusText}`;
+    try {
+      const json = await response.clone().json();
+      // FastAPI uses `detail`, Express/api-gateway uses `error`
+      if (json?.detail) errorDetail = json.detail;
+      else if (json?.error) errorDetail = json.error;
+    } catch {
+      // Body is not JSON
+    }
+    throw new Error(errorDetail);
+  }
+
+  return response;
+}
+
+// ---------------------------------------------------------------------------
+// Typed helpers — Chat
 // ---------------------------------------------------------------------------
 
 export interface ChatRequestBody {
@@ -107,9 +139,12 @@ export async function postChatMessage(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Typed helpers — Ingestion (port 3001)
+// ---------------------------------------------------------------------------
+
 export interface IngestRequestBody {
-  sessionId: string;
-  repositoryUrl: string;
+  repository_url: string;
 }
 
 export interface IngestResponseBody {
@@ -122,11 +157,47 @@ export interface IngestResponseBody {
  * Queues a repository for RAG ingestion.
  */
 export async function postIngestRepository(
-  body: IngestRequestBody
+  repositoryUrl: string
 ): Promise<IngestResponseBody> {
-  const response = await apiFetch("/api/ingest", {
+  const response = await ingestFetch("/api/ingest", {
     method: "POST",
-    body: JSON.stringify(body),
+    body: JSON.stringify({ repository_url: repositoryUrl }),
   });
+  return response.json();
+}
+
+/**
+ * GET /api/status/:sessionId
+ * Returns current ingestion status.
+ */
+export interface IngestStatusResponse {
+  status: "queued" | "processing" | "completed" | "failed";
+  error?: string;
+}
+
+export async function getIngestStatus(
+  sessionId: string
+): Promise<IngestStatusResponse> {
+  const response = await ingestFetch(`/api/status/${sessionId}`);
+  return response.json();
+}
+
+// ---------------------------------------------------------------------------
+// Typed helpers — Session info (port 8000)
+// ---------------------------------------------------------------------------
+
+export interface SessionInfo {
+  status: string;
+  repo_url: string;
+}
+
+/**
+ * GET /api/session/:sessionId
+ * Returns session metadata.
+ */
+export async function getSessionInfo(
+  sessionId: string
+): Promise<SessionInfo> {
+  const response = await apiFetch(`/api/session/${sessionId}`);
   return response.json();
 }

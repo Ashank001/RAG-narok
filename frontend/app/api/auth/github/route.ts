@@ -33,17 +33,51 @@ export async function POST(request: NextRequest) {
     console.log("[Route /api/auth/github] Forwarding code to FastAPI…");
 
     // 2. Forward to FastAPI — no CORS, this is pure server-to-server
-    const backendResponse = await fetch(
-      `${BACKEND_URL}/api/auth/github`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({ code }),
+    //    Retry up to 3 times to handle transient SocketErrors caused by
+    //    uvicorn --reload restarting mid-request.
+    const MAX_RETRIES = 3;
+    let backendResponse: Response | null = null;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        backendResponse = await fetch(
+          `${BACKEND_URL}/api/auth/github`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({ code }),
+          }
+        );
+        break; // success — exit retry loop
+      } catch (err) {
+        lastError = err;
+        console.warn(
+          `[Route /api/auth/github] Attempt ${attempt}/${MAX_RETRIES} failed:`,
+          err instanceof Error ? err.message : err
+        );
+        if (attempt < MAX_RETRIES) {
+          // Exponential backoff: 500ms, 1000ms
+          await new Promise((r) => setTimeout(r, 500 * attempt));
+        }
       }
-    );
+    }
+
+    if (!backendResponse) {
+      console.error("[Route /api/auth/github] All retries exhausted:", lastError);
+      return NextResponse.json(
+        {
+          detail:
+            lastError instanceof Error
+              ? lastError.message
+              : "Could not reach FastAPI backend after retries",
+        },
+        { status: 502 }
+      );
+    }
 
     const data = await backendResponse.json();
 

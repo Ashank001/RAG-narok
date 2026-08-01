@@ -6,8 +6,9 @@
  * synchronously from anywhere in the browser environment.
  */
 
-const TOKEN_KEY = "ragnarok_access_token";
+const TOKEN_KEY = "ragnarok_token";
 const USERNAME_KEY = "ragnarok_username";
+const AVATAR_KEY = "ragnarok_avatar";
 
 // ---------------------------------------------------------------------------
 // Token storage helpers
@@ -25,11 +26,12 @@ export function getAuthToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
 
-/** Clear the stored JWT (logout). */
+/** Clear all auth data (logout). */
 export function clearAuthToken(): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USERNAME_KEY);
+  localStorage.removeItem(AVATAR_KEY);
 }
 
 /** Return true when a valid, non-expired token is present in storage. */
@@ -71,6 +73,31 @@ export function saveUsername(username: string): void {
 export function getUsername(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem(USERNAME_KEY);
+}
+
+// ---------------------------------------------------------------------------
+// Avatar helpers
+// ---------------------------------------------------------------------------
+
+export function saveAvatar(avatarUrl: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(AVATAR_KEY, avatarUrl);
+}
+
+export function getAvatar(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(AVATAR_KEY);
+}
+
+/**
+ * Derive GitHub avatar URL from username.
+ * Fallback if the backend doesn't return an avatar_url field.
+ */
+export function getAvatarUrl(username?: string | null): string | null {
+  const stored = getAvatar();
+  if (stored) return stored;
+  if (username) return `https://github.com/${username}.png?size=80`;
+  return null;
 }
 
 // ---------------------------------------------------------------------------

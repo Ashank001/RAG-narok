@@ -3,36 +3,22 @@
 /**
  * app/auth/callback/page.tsx
  * --------------------------
- * GitHub OAuth callback handler.
- *
- * Flow:
- *  1. GitHub redirects here with ?code=<authorization_code>
- *  2. We POST that code to our FastAPI backend at POST /api/auth/github
- *  3. The backend exchanges it for a GitHub access token, creates a JWT, and
- *     returns { access_token, token_type, username }
- *  4. We store the JWT in localStorage and redirect to the main chat ("/")
- *
- * IMPORTANT (Next.js 16 / React 19):
- *  `useSearchParams` must be inside a <Suspense> boundary when the route
- *  might be statically prerendered. We handle this by splitting into a
- *  server-renderable shell (this file) and a client-only inner component.
+ * GitHub OAuth callback page shell.
+ * Wraps the dynamic callback logic in Suspense for Next.js compatibility.
  */
 
 import { Suspense } from "react";
 import CallbackHandler from "@/app/auth/callback/CallbackHandler";
 
-// ---------------------------------------------------------------------------
-// Fallback shown while JS hydrates (and also during prerendering)
-// ---------------------------------------------------------------------------
 function CallbackFallback() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950">
+    <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a]">
       <div className="flex flex-col items-center gap-4 text-center">
         <div className="relative flex h-14 w-14 items-center justify-center">
-          <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" />
-          <div className="absolute inset-0 animate-spin rounded-full border-t-2 border-emerald-400" />
+          <div className="absolute inset-0 rounded-full border-2 border-[#1e1e1e]" />
+          <div className="absolute inset-0 animate-spin rounded-full border-t-2 border-[#00ff88]" />
           <svg
-            className="h-6 w-6 text-emerald-400"
+            className="h-6 w-6 text-[#00ff88]"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -54,9 +40,6 @@ function CallbackFallback() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Page shell — wraps the dynamic callback logic in Suspense
-// ---------------------------------------------------------------------------
 export default function CallbackPage() {
   return (
     <Suspense fallback={<CallbackFallback />}>

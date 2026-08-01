@@ -3,32 +3,36 @@
 /**
  * app/auth/callback/CallbackHandler.tsx
  * --------------------------------------
- * The actual OAuth callback logic component.
- * Separated from page.tsx so it can be safely wrapped in <Suspense> while
- * still calling useSearchParams() (a Client Component hook).
+ * OAuth callback logic — exchanges the GitHub code for a JWT token,
+ * stores it, and redirects to /dashboard.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { saveAuthToken, saveUsername } from "@/lib/auth";
+import { saveAuthToken, saveUsername, saveAvatar } from "@/lib/auth";
+import { motion } from "framer-motion";
 
 type CallbackStatus =
   | { phase: "exchanging" }
   | { phase: "success"; username: string }
   | { phase: "error"; message: string };
 
-
-
 export default function CallbackHandler() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<CallbackStatus>({ phase: "exchanging" });
 
+  // Guard against React 18 Strict Mode double-firing this effect.
+  // GitHub OAuth codes are single-use — a second exchange attempt would fail.
+  const exchangedRef = useRef(false);
+
   useEffect(() => {
+    if (exchangedRef.current) return;   // already fired once
+    exchangedRef.current = true;
+
     const code = searchParams.get("code");
     const errorParam = searchParams.get("error");
 
-    // GitHub signals a user-denied authorization via ?error=access_denied
     if (errorParam) {
       setStatus({
         phase: "error",
@@ -49,14 +53,11 @@ export default function CallbackHandler() {
       return;
     }
 
-    // Exchange the code via the Next.js proxy route (/api/auth/github).
-    // The proxy calls FastAPI server-to-server — no CORS, no ERR_EMPTY_RESPONSE.
     const exchangeCode = async () => {
-      const endpoint = "/api/auth/github"; // same-origin → zero CORS
+      const endpoint = "/api/auth/github";
       const payload = { code };
 
       console.info("[Auth] Forwarding code through Next.js proxy:", endpoint);
-      console.info("[Auth] Payload:", payload);
 
       try {
         const response = await fetch(endpoint, {
@@ -88,6 +89,7 @@ export default function CallbackHandler() {
           access_token: string;
           token_type: string;
           username: string;
+          avatar_url?: string;
         } = await response.json();
 
         console.info("[Auth] Token exchange successful for user:", data.username);
@@ -95,12 +97,15 @@ export default function CallbackHandler() {
         // Persist credentials
         saveAuthToken(data.access_token);
         saveUsername(data.username);
+        if (data.avatar_url) {
+          saveAvatar(data.avatar_url);
+        }
 
         setStatus({ phase: "success", username: data.username });
 
-        // Brief delay so the user sees the success state before redirect
+        // Redirect to dashboard
         setTimeout(() => {
-          router.replace("/");
+          router.replace("/dashboard");
         }, 1200);
       } catch (err) {
         console.error("[Auth] Token exchange failed:", err);
@@ -116,7 +121,7 @@ export default function CallbackHandler() {
 
     exchangeCode();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Run once on mount — searchParams is stable after initial render
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Render states
@@ -124,14 +129,18 @@ export default function CallbackHandler() {
 
   if (status.phase === "exchanging") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-zinc-950">
-        <div className="flex flex-col items-center gap-6 text-center px-6 max-w-sm">
+      <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a]">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex flex-col items-center gap-6 text-center px-6 max-w-sm"
+        >
           {/* Spinner */}
           <div className="relative flex h-16 w-16 items-center justify-center">
-            <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" />
-            <div className="absolute inset-0 animate-spin rounded-full border-t-2 border-emerald-400" />
+            <div className="absolute inset-0 rounded-full border-2 border-[#1e1e1e]" />
+            <div className="absolute inset-0 animate-spin rounded-full border-t-2 border-[#00ff88]" />
             <svg
-              className="h-7 w-7 text-emerald-400"
+              className="h-7 w-7 text-[#00ff88]"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -150,8 +159,7 @@ export default function CallbackHandler() {
               Authenticating…
             </p>
             <p className="text-sm text-zinc-500">
-              Exchanging your authorization code with the backend. This only
-              takes a second.
+              Exchanging your authorization code. This only takes a second.
             </p>
           </div>
 
@@ -159,22 +167,22 @@ export default function CallbackHandler() {
           <div className="flex flex-col gap-2 w-full text-left">
             {[
               { label: "Received GitHub code", done: true },
-              { label: "Verifying with FastAPI backend", done: false, active: true },
+              { label: "Verifying with backend", done: false, active: true },
               { label: "Saving session", done: false },
             ].map(({ label, done, active }) => (
               <div key={label} className="flex items-center gap-2.5">
                 <div
                   className={`h-4 w-4 shrink-0 rounded-full flex items-center justify-center ${
                     done
-                      ? "bg-emerald-500"
+                      ? "bg-[#00ff88]"
                       : active
-                      ? "border-2 border-emerald-400 animate-pulse"
-                      : "border border-zinc-700"
+                      ? "border-2 border-[#00ff88] animate-pulse"
+                      : "border border-[#2a2a2a]"
                   }`}
                 >
                   {done && (
                     <svg
-                      className="h-2.5 w-2.5 text-white"
+                      className="h-2.5 w-2.5 text-black"
                       fill="none"
                       viewBox="0 0 24 24"
                       stroke="currentColor"
@@ -191,7 +199,7 @@ export default function CallbackHandler() {
                 <span
                   className={`text-xs ${
                     done
-                      ? "text-emerald-400"
+                      ? "text-[#00ff88]"
                       : active
                       ? "text-zinc-200"
                       : "text-zinc-600"
@@ -202,19 +210,22 @@ export default function CallbackHandler() {
               </div>
             ))}
           </div>
-        </div>
+        </motion.div>
       </div>
     );
   }
 
   if (status.phase === "success") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-zinc-950">
-        <div className="flex flex-col items-center gap-6 text-center px-6 max-w-sm">
-          {/* Success icon */}
-          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/30">
+      <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a]">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="flex flex-col items-center gap-6 text-center px-6 max-w-sm"
+        >
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#00ff88]/10 ring-1 ring-[#00ff88]/30">
             <svg
-              className="h-8 w-8 text-emerald-400"
+              className="h-8 w-8 text-[#00ff88]"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -236,16 +247,19 @@ export default function CallbackHandler() {
               Authentication successful. Taking you to RAGnarok…
             </p>
           </div>
-        </div>
+        </motion.div>
       </div>
     );
   }
 
   // Error state
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-6">
-      <div className="flex flex-col items-center gap-6 text-center max-w-sm w-full">
-        {/* Error icon */}
+    <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a] px-6">
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex flex-col items-center gap-6 text-center max-w-sm w-full"
+      >
         <div className="flex h-16 w-16 items-center justify-center rounded-full bg-red-500/10 ring-1 ring-red-500/25">
           <svg
             className="h-8 w-8 text-red-400"
@@ -271,7 +285,6 @@ export default function CallbackHandler() {
           </p>
         </div>
 
-        {/* Error detail box */}
         <div className="w-full rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-left">
           <p className="text-xs font-mono text-red-400 break-words">
             {status.message}
@@ -281,7 +294,7 @@ export default function CallbackHandler() {
         <button
           id="retry-login-btn"
           onClick={() => router.push("/login")}
-          className="flex w-full items-center justify-center gap-2 rounded-xl border border-zinc-700 bg-zinc-800 px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:border-zinc-600 hover:bg-zinc-700 active:scale-[0.98]"
+          className="flex w-full items-center justify-center gap-2 rounded-xl border border-[#2a2a2a] bg-[#1a1a1a] px-5 py-3 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:border-[#3a3a3a] hover:bg-[#222222] active:scale-[0.98]"
         >
           <svg
             className="h-4 w-4"
@@ -298,7 +311,7 @@ export default function CallbackHandler() {
           </svg>
           Back to Login
         </button>
-      </div>
+      </motion.div>
     </div>
   );
 }
