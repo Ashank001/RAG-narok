@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 import hashlib
 import redis
 from datetime import datetime, timezone, timedelta
@@ -65,6 +66,8 @@ from langchain_core.prompts import ChatPromptTemplate
 # pyrefly: ignore [missing-import]
 from langchain_core.output_parsers import StrOutputParser
 # pyrefly: ignore [missing-import]
+from langchain_core.messages import SystemMessage, HumanMessage
+# pyrefly: ignore [missing-import]
 from pymongo import MongoClient
 # pyrefly: ignore [missing-import]
 import certifi
@@ -72,6 +75,14 @@ import certifi
 # Cross-Encoder for reranking retrieved chunks
 # pyrefly: ignore [missing-import]
 from sentence_transformers import CrossEncoder
+
+# Groq SDK — for RateLimitError detection in the fallback chain
+# pyrefly: ignore [missing-import]
+from groq import RateLimitError as GroqRateLimitError
+
+# Gemini SDK — third fallback LLM provider
+# pyrefly: ignore [missing-import]
+import google.genai as genai
 
 # (load_dotenv already called at the top of this file)
 
@@ -261,12 +272,11 @@ def rerank_documents(query: str, documents: list, top_k: int = RERANK_TOP_K) -> 
 
 
 # ---------------------------------------------------------
-# 3. LLM Configuration (Groq — free tier, 14,400 req/day)
+# 3. LLM Configuration — Primary + Fallback Providers
 # ---------------------------------------------------------
-# llama-3.3-70b-versatile: best free model for code understanding & RAG
+# Provider 1: Groq — llama-3.3-70b-versatile (primary)
 # Groq's LPU hardware makes this the fastest inference available.
-# To swap back to Gemini: replace ChatGroq with ChatGoogleGenerativeAI
-# and set model="gemini-2.5-flash" — no other code changes needed.
+# Free tier: 14,400 tokens/day.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("CRITICAL: GROQ_API_KEY missing from .env — get a free key at https://console.groq.com")
@@ -278,12 +288,111 @@ llm = ChatGroq(
     max_retries=3,
     groq_api_key=GROQ_API_KEY,
 )
+
+# Provider 2: Cloudflare Workers AI — @cf/meta/llama-3.1-8b-instruct (first fallback)
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
+if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+    _log.warning("Cloudflare Workers AI credentials not set — Cloudflare fallback disabled")
+
+# Provider 3: Gemini Flash — gemini-1.5-flash (second fallback)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    _log.warning("GEMINI_API_KEY not set — Gemini fallback disabled")
+
+
 # ---------------------------------------------------------
-# 4. LangChain Prompt & Chain (built dynamically per-request in /chat)
+# 4. LLM Fallback Chain — Streaming Providers
 # ---------------------------------------------------------
-# The chat endpoint constructs the prompt at request time based on
-# whether vector context was retrieved. This avoids crashes when the
-# collection is empty (no repos ingested yet).
+# Each provider is an async generator yielding text chunks.
+# The fallback orchestrator tries them in order: Groq → Cloudflare → Gemini.
+# If a provider fails BEFORE yielding any tokens, the next one is tried.
+# If it fails AFTER partial streaming, the error is propagated (can't retry).
+
+async def _stream_groq(system_prompt: str, user_query: str):
+    """
+    Stream response from Groq via LangChain ChatGroq.
+    Uses direct message objects to avoid curly-brace escaping issues
+    in code context that would break ChatPromptTemplate interpolation.
+    """
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_query)]
+    async for chunk in llm.astream(messages):
+        if chunk.content:
+            yield chunk.content
+
+
+async def _stream_cloudflare(system_prompt: str, user_query: str):
+    """
+    Stream response from Cloudflare Workers AI via httpx SSE.
+    Model: @cf/meta/llama-3.1-8b-instruct
+    Endpoint: POST https://api.cloudflare.com/client/v4/accounts/{id}/ai/run/{model}
+    """
+    model_path = "@cf/meta/llama-3.1-8b-instruct"
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/"
+        f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/{model_path}"
+    )
+    headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_query},
+        ],
+        "stream": True,
+    }
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    text = chunk.get("response", "")
+                    if text:
+                        yield text
+                except json.JSONDecodeError:
+                    continue
+
+
+async def _stream_gemini(system_prompt: str, user_query: str):
+    """
+    Stream response from Google Gemini Flash via google-generativeai SDK.
+    Model: gemini-1.5-flash
+    Uses async streaming: generate_content_async(stream=True).
+    """
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=system_prompt,
+    )
+    response = await model.generate_content_async(user_query, stream=True)
+    async for chunk in response:
+        if chunk.text:
+            yield chunk.text
+
+
+def _get_available_providers():
+    """
+    Returns an ordered list of (provider_name, stream_function) tuples
+    for all LLM providers whose credentials are configured.
+    """
+    providers = []
+    if GROQ_API_KEY:
+        providers.append(("groq", _stream_groq))
+    if CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN:
+        providers.append(("cloudflare", _stream_cloudflare))
+    if GEMINI_API_KEY:
+        providers.append(("gemini", _stream_gemini))
+    return providers
 
 
 # ---------------------------------------------------------
@@ -313,41 +422,83 @@ def health():
 @app.post("/chat/{session_id}")
 @limiter.limit(f"{DAILY_CHAT_LIMIT}/day")
 async def chat(request: Request, session_id: str, chat_request: ChatRequest, current_user: str = Depends(get_current_user)):
-    """ Locked down secure streaming RAG endpoint.
-    RAG-powered chat endpoint:
-    1. Converts the user's query into a vector via GoogleGenerativeAIEmbeddings.
-    2. Performs similarity search on rag_db.code_vectors via MongoDBAtlasVectorSearch.
-    3. If context is found, injects it into a system prompt alongside the user's question.
-    4. If the collection is empty (no repos ingested), falls back to a direct LLM call.
-    5. Streams Gemini's response back to the frontend as SSE chunks.
+    """ Locked down secure streaming RAG endpoint with LLM fallback chain,
+    Redis response caching, and conversation memory.
+
+    Order of operations per request:
+    1. Check Redis cache → if HIT, stream word-by-word and return immediately.
+    2. Load conversation history from Redis (last 6 message pairs).
+    3. Embed query locally and vector-search MongoDB Atlas (existing code).
+    4. Rerank retrieved chunks with cross-encoder (existing code).
+    5. Build RAG prompt WITH conversation history.
+    6. Try LLM providers in fallback order: Groq → Cloudflare → Gemini.
+    7. Stream response to client as SSE.
+    8. After stream ends: save to Redis cache + save to conversation history.
     """
     if not chat_request.query or not chat_request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
     user_query = chat_request.query.strip()
-    normalized_query = " ".join(user_query.lower().split())
 
     # -------------------------------------------------
-    # LLM RESPONSE CACHE (Check)
+    # STEP 1: LLM RESPONSE CACHE — Check
     # -------------------------------------------------
-    cache_hash = hashlib.sha256(f"{session_id}:{normalized_query}".encode("utf-8")).hexdigest()
-    cache_key = f"chat_cache:{cache_hash}"
+    cache_key = "llm_cache:" + hashlib.sha256(
+        f"{session_id}:{user_query.strip().lower()}".encode()
+    ).hexdigest()
 
     try:
         cached_response = redis_client.get(cache_key)
         if cached_response:
-            _log.info("Cache hit", extra={"session_id": session_id})
+            _log.info("Cache hit, serving from Redis", extra={"session_id": session_id})
+
             async def stream_cache():
-                yield f"data: {json.dumps({'text': cached_response})}\n\n"
+                words = cached_response.split(" ")
+                for i, word in enumerate(words):
+                    # Reconstruct spacing: first word has no leading space,
+                    # subsequent words get a space prepended.
+                    token = word if i == 0 else " " + word
+                    yield f"data: {json.dumps({'text': token})}\n\n"
+                    await asyncio.sleep(0.02)
                 yield f"data: {json.dumps({'done': True})}\n\n"
-            return StreamingResponse(stream_cache(), media_type="text/event-stream")
+
+            return StreamingResponse(
+                stream_cache(),
+                media_type="text/event-stream",
+                headers={"X-Cache": "HIT"},
+            )
     except Exception as e:
         _log.warning("Cache check failed", extra={"session_id": session_id, "error": str(e)})
+
+    # -------------------------------------------------
+    # STEP 2: CONVERSATION MEMORY — Retrieve
+    # -------------------------------------------------
+    history_key = f"chat_history:{session_id}"
+    history_context = ""
+    try:
+        # LRANGE 0 11 → last 12 items (6 user + 6 assistant messages).
+        # LPUSH pushes to head, so index 0 is newest. Reverse for chronological order.
+        raw_history = redis_client.lrange(history_key, 0, 11)
+        if raw_history:
+            chronological = list(reversed(raw_history))
+            history_context = "\n\nPrevious conversation:\n"
+            for i in range(0, len(chronological) - 1, 2):
+                try:
+                    item_a = json.loads(chronological[i])
+                    item_b = json.loads(chronological[i + 1])
+                    if item_a.get("role") == "user" and item_b.get("role") == "assistant":
+                        history_context += f"User: {item_a['content']}\nAssistant: {item_b['content']}\n"
+                    elif item_a.get("role") == "assistant" and item_b.get("role") == "user":
+                        history_context += f"User: {item_b['content']}\nAssistant: {item_a['content']}\n"
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except Exception as e:
+        _log.warning("History retrieval failed", extra={"session_id": session_id, "error": str(e)})
 
     async def generate_stream():
         try:
             # -------------------------------------------------
-            # Step 1: Retrieve relevant code chunks from Atlas
+            # STEP 3: Retrieve relevant code chunks from Atlas
             # -------------------------------------------------
             context_text = ""
             try:
@@ -369,7 +520,6 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                         if attempt == max_search_attempts:
                             _log.error("similarity_search failed after max attempts", extra={"session_id": session_id, "attempts": max_search_attempts, "error": str(search_exc)})
                             raise search_exc
-                        import asyncio
                         wait = _parse_retry_delay_secs(search_exc, default=search_backoff)
                         _log.warning("similarity_search failed, retrying", extra={"session_id": session_id, "attempt": attempt, "max_attempts": max_search_attempts, "retry_in_secs": round(wait, 1)})
                         await asyncio.sleep(wait)
@@ -377,7 +527,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
 
                 if retrieved_docs:
                     # -----------------------------------------
-                    # Step 1b: Rerank with cross-encoder
+                    # STEP 4: Rerank with cross-encoder
                     # -----------------------------------------
                     _log.info("Reranking candidates", extra={
                         "session_id": session_id,
@@ -403,95 +553,110 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                 return
 
             # -------------------------------------------------
-            # CONVERSATION MEMORY (Retrieve)
-            # -------------------------------------------------
-            history_key = f"chat_history:{session_id}"
-            history_context = ""
-            try:
-                # LPUSH pushes to head, so index 0 is newest. Reversing it gives chronological order.
-                raw_history = redis_client.lrange(history_key, 0, 5)
-                if raw_history:
-                    chronological_history = reversed(raw_history)
-                    history_context = "\nConversation History:\n" + "\n".join(chronological_history) + "\n"
-            except Exception as e:
-                _log.warning("History retrieval failed", extra={"session_id": session_id, "error": str(e)})
-
-            # -------------------------------------------------
-            # Step 2: Build prompt based on whether context exists
+            # STEP 5: Build RAG prompt WITH conversation history
             # -------------------------------------------------
             if context_text:
-                # RAG mode: inject retrieved codebase context
-                chat_prompt = ChatPromptTemplate.from_messages([
-                    ("system",
-                     "You are an elite software architecture assistant named RAGnarok. "
-                     "Use the following retrieved codebase snippets to answer the user's question accurately. "
-                     "Reference specific file names, functions, or patterns from the context when relevant. "
-                     "If the answer is not contained within the provided context, state that clearly. "
-                     "Do not hallucinate code that isn't there.\n\n"
-                     "Codebase Context:\n{context}\n{history}"),
-                    ("human", "{question}")
-                ])
-                chain = chat_prompt | llm | StrOutputParser()
-                stream_input = {"context": context_text, "history": history_context, "question": user_query}
+                # RAG mode: inject retrieved codebase context + history
+                system_prompt = (
+                    "You are an elite software architecture assistant named RAGnarok. "
+                    "Use the following retrieved codebase snippets to answer the user's question accurately. "
+                    "Reference specific file names, functions, or patterns from the context when relevant. "
+                    "If the answer is not contained within the provided context, state that clearly. "
+                    "Do not hallucinate code that isn't there.\n\n"
+                    f"Codebase Context:\n{context_text}"
+                    f"{history_context}"
+                )
             else:
                 # Fallback mode: no context available, answer directly
-                chat_prompt = ChatPromptTemplate.from_messages([
-                    ("system",
-                     "You are an elite software architecture assistant named RAGnarok. "
-                     "No codebase has been ingested yet, so you have no repository context. "
-                     "Answer the user's question using your general knowledge. "
-                     "If the question seems to be about a specific codebase, suggest they ingest "
-                     "a repository first using the Ingest Repository panel.\n{history}"),
-                    ("human", "{question}")
-                ])
-                chain = chat_prompt | llm | StrOutputParser()
-                stream_input = {"history": history_context, "question": user_query}
+                system_prompt = (
+                    "You are an elite software architecture assistant named RAGnarok. "
+                    "No codebase has been ingested yet, so you have no repository context. "
+                    "Answer the user's question using your general knowledge. "
+                    "If the question seems to be about a specific codebase, suggest they ingest "
+                    "a repository first using the Ingest Repository panel."
+                    f"{history_context}"
+                )
 
             # -------------------------------------------------
-            # Step 3: Stream the LLM response as SSE
+            # STEP 6 & 7: LLM Fallback Chain — Stream to client
             # -------------------------------------------------
-            max_llm_attempts = 5
-            llm_backoff = 5.0
             full_response = []
-            for attempt in range(1, max_llm_attempts + 1):
+            provider_used = None
+            providers = _get_available_providers()
+            last_error = None
+
+            for provider_name, stream_fn in providers:
                 try:
-                    yielded_chunks = False
+                    yielded_any = False
                     full_response = []
-                    async for chunk in chain.astream(stream_input):
+                    async for chunk in stream_fn(system_prompt, user_query):
                         full_response.append(chunk)
                         yield f"data: {json.dumps({'text': chunk})}\n\n"
-                        yielded_chunks = True
-                    break
-                except Exception as stream_exc:
-                    if yielded_chunks:
-                        _log.error("Stream interrupted midway", extra={"session_id": session_id, "error": str(stream_exc)})
-                        raise stream_exc
-                    if attempt == max_llm_attempts:
-                        _log.error("Stream failed after max attempts", extra={"session_id": session_id, "attempts": max_llm_attempts, "error": str(stream_exc)})
-                        raise stream_exc
-                    _log.warning("Stream init failed, retrying", extra={"session_id": session_id, "attempt": attempt, "max_attempts": max_llm_attempts, "retry_in_secs": llm_backoff})
-                    import asyncio
-                    await asyncio.sleep(llm_backoff)
-                    llm_backoff *= 2.0
+                        yielded_any = True
+                    provider_used = provider_name
+                    _log.info("LLM provider used", extra={"provider": provider_name, "session_id": session_id})
+                    break  # Success — exit the fallback loop
+                except Exception as provider_exc:
+                    if yielded_any:
+                        # Partial data already sent to client — cannot retry/fallback
+                        _log.error("Stream interrupted midway", extra={
+                            "provider": provider_name,
+                            "session_id": session_id,
+                            "error": str(provider_exc),
+                        })
+                        raise provider_exc
+                    # Log the appropriate level based on error type
+                    if isinstance(provider_exc, GroqRateLimitError) or "429" in str(provider_exc):
+                        _log.warning("LLM provider rate-limited, trying next", extra={
+                            "provider": provider_name,
+                            "session_id": session_id,
+                            "error": str(provider_exc),
+                        })
+                    else:
+                        _log.warning("LLM provider failed, trying next", extra={
+                            "provider": provider_name,
+                            "session_id": session_id,
+                            "error": str(provider_exc),
+                        })
+                    last_error = provider_exc
+                    continue
+
+            if provider_used is None:
+                _log.error("All LLM providers exhausted", extra={
+                    "session_id": session_id,
+                    "last_error": str(last_error),
+                })
+                yield f"data: {json.dumps({'error': 'All LLM providers exhausted. Try again later.'})}\n\n"
+                return
 
             # -------------------------------------------------
-            # SAVE CACHE & CONVERSATION HISTORY
+            # STEP 8 & 9: Save to Redis cache + conversation history
             # -------------------------------------------------
             final_answer = "".join(full_response)
             try:
+                # Cache the full response for 1 hour (3600 seconds)
                 if final_answer:
-                    # Cache response for 1 hour
-                    redis_client.setex(cache_key, 3600, final_answer)
-                
-                # Push User then Assistant so reverse order is chronological
-                redis_client.lpush(history_key, f"User: {user_query}")
-                redis_client.lpush(history_key, f"Assistant: {final_answer}")
-                # Keep only last 6 messages
-                redis_client.ltrim(history_key, 0, 5)
-                # Auto-expire after 2 hours
+                    redis_client.set(cache_key, final_answer, ex=3600)
+
+                # Store conversation pair as JSON in Redis list
+                # LPUSH user first, then assistant (so head = newest assistant)
+                redis_client.lpush(
+                    history_key,
+                    json.dumps({"role": "user", "content": user_query}),
+                )
+                redis_client.lpush(
+                    history_key,
+                    json.dumps({"role": "assistant", "content": final_answer}),
+                )
+                # Keep only last 12 items (6 user + 6 assistant = 6 pairs)
+                redis_client.ltrim(history_key, 0, 11)
+                # Reset TTL to 2 hours on each message
                 redis_client.expire(history_key, 7200)
             except Exception as e:
-                _log.warning("Failed to save cache or history", extra={"session_id": session_id, "error": str(e)})
+                _log.warning("Failed to save cache or history", extra={
+                    "session_id": session_id,
+                    "error": str(e),
+                })
 
             # Send completion signal
             yield f"data: {json.dumps({'done': True})}\n\n"
@@ -500,7 +665,11 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
             _log.error("Streaming error", extra={"session_id": session_id, "error": str(e)})
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
-    return StreamingResponse(generate_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={"X-Cache": "MISS"},
+    )
 
 # ---------------------------------------------------------
 # Ingestion API (Triggered by api-gateway BullMQ worker)
@@ -579,4 +748,3 @@ async def github_login(payload: dict):
     app_jwt = create_access_token(data={"sub": github_username})
     
     return {"access_token": app_jwt, "token_type": "bearer", "username": github_username}
-    
