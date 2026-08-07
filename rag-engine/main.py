@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import hashlib
+# pyrefly: ignore [missing-import]
 import redis
 from datetime import datetime, timezone, timedelta
 # pyrefly: ignore [missing-import]
@@ -597,6 +598,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                     _log.info("LLM provider used", extra={"provider": provider_name, "session_id": session_id})
                     break  # Success — exit the fallback loop
                 except Exception as provider_exc:
+                    # pyrefly: ignore [unbound-name]
                     if yielded_any:
                         # Partial data already sent to client — cannot retry/fallback
                         _log.error("Stream interrupted midway", extra={
