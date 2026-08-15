@@ -12,5 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Use start.sh which runs both uvicorn + celery
+# Make start.sh executable
+RUN chmod +x start.sh
+
 CMD ["sh", "start.sh"]
