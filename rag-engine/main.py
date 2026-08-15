@@ -316,11 +316,9 @@ CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
 if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
     _log.warning("Cloudflare Workers AI credentials not set — Cloudflare fallback disabled")
 
-# Provider 3: Gemini Flash — gemini-1.5-flash (second fallback)
+# Provider 3: Gemini Flash — gemini-2.0-flash (second fallback)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
+if not GEMINI_API_KEY:
     _log.warning("GEMINI_API_KEY not set — Gemini fallback disabled")
 
 
@@ -387,15 +385,18 @@ async def _stream_cloudflare(system_prompt: str, user_query: str):
 
 async def _stream_gemini(system_prompt: str, user_query: str):
     """
-    Stream response from Google Gemini Flash via google-generativeai SDK.
-    Model: gemini-1.5-flash
-    Uses async streaming: generate_content_async(stream=True).
+    Stream response from Google Gemini Flash via the new google-genai SDK.
+    Model: gemini-2.0-flash
+    Uses async streaming: client.aio.models.generate_content_stream().
     """
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=system_prompt,
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    response = await client.aio.models.generate_content_stream(
+        model="gemini-2.0-flash",
+        contents=user_query,
+        config=genai.types.GenerateContentConfig(
+            system_instruction=system_prompt,
+        ),
     )
-    response = await model.generate_content_async(user_query, stream=True)
     async for chunk in response:
         if chunk.text:
             yield chunk.text
