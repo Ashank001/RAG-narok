@@ -5,20 +5,38 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const redisHost = process.env.REDIS_HOST || '127.0.0.1';
-const redisPort = parseInt(process.env.REDIS_PORT || '6379', 10);
 const ragEngineUrl = process.env.RAG_ENGINE_URL || 'http://rag-engine:8000';
 const internalApiKey = process.env.INTERNAL_API_KEY || '';
+
+// Parse REDIS_URL for Upstash TLS support
+function getRedisConnection() {
+  const redisUrl = process.env.REDIS_URL;
+
+  if (redisUrl) {
+    const url = new URL(redisUrl);
+    const tls = url.protocol === 'rediss:';
+    return {
+      host: url.hostname,
+      port: parseInt(url.port || '6379', 10),
+      password: url.password || undefined,
+      username: url.username || undefined,
+      tls: tls ? {} : undefined,
+    };
+  }
+
+  return {
+    host: process.env.REDIS_HOST || '127.0.0.1',
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+  };
+}
+
+const connection = getRedisConnection();
 
 interface IngestJobData {
   sessionId: string;
   repositoryUrl: string;
 }
 
-/**
- * Thin HTTP wrapper — avoids pulling in axios just for one POST.
- * Sends a JSON POST to the given URL and resolves with the response body.
- */
 function postJson(url: string, body: object, headers: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
@@ -54,11 +72,6 @@ function postJson(url: string, body: object, headers: Record<string, string>): P
   });
 }
 
-/**
- * BullMQ Worker — consumes jobs from "ingestion-queue" and forwards them
- * to the FastAPI rag-engine's /api/ingest endpoint, which in turn dispatches
- * the Celery task.  This bridges the Node (BullMQ) and Python (Celery) worlds.
- */
 const ingestionWorker = new Worker<IngestJobData>(
   'ingestion-queue',
   async (job: Job<IngestJobData>) => {
@@ -73,18 +86,13 @@ const ingestionWorker = new Worker<IngestJobData>(
     await postJson(
       endpoint,
       { sessionId, repositoryUrl },
-      // Use the shared internal key so FastAPI skips JWT validation
       { 'X-Internal-Key': internalApiKey },
     );
 
     console.log(`[BullMQ Worker] Forwarded job ${job.id} to FastAPI. Celery task dispatched.`);
   },
   {
-    connection: {
-      host: redisHost,
-      port: redisPort,
-    },
-    // Process one job at a time to avoid hammering the embedding API
+    connection,
     concurrency: 1,
   },
 );
@@ -98,7 +106,7 @@ ingestionWorker.on('failed', (job, err) => {
 });
 
 console.log(
-  `[BullMQ Worker] Listening on "ingestion-queue" — Redis ${redisHost}:${redisPort} → FastAPI ${ragEngineUrl}`,
+  `[BullMQ Worker] Listening on "ingestion-queue" — Redis ${connection.host}:${connection.port} → FastAPI ${ragEngineUrl}`,
 );
 
 export { ingestionWorker };
