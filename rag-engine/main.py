@@ -186,20 +186,28 @@ class IngestRequest(BaseModel):
 # ---------------------------------------------------------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    raise ValueError("CRITICAL: MONGO_URI missing from .env")
+    _log.critical("MONGO_URI missing from environment — database features will fail")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+except Exception as _redis_err:
+    _log.critical("Failed to create Redis client", extra={"error": str(_redis_err)})
+    redis_client = None  # type: ignore[assignment]
 
 # Connect to Atlas using synchronous MongoClient for LangChain
 # tlsCAFile=certifi.where() fixes TLSV1_ALERT_INTERNAL_ERROR on Windows/older OpenSSL
 # tlsAllowInvalidCertificates=True is a dev-only fallback for Windows TLS handshake issues
-mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True)
+try:
+    mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True) if MONGO_URI else None
+except Exception as _mongo_err:
+    _log.critical("Failed to create MongoDB client", extra={"error": str(_mongo_err)})
+    mongo_client = None  # type: ignore[assignment]
 
 # IMPORTANT: Ensure these match what you set in your ingestion worker!
 DB_NAME = "rag_db"
 COLLECTION_NAME = "code_vectors"
-collection = mongo_client[DB_NAME][COLLECTION_NAME]
+collection = mongo_client[DB_NAME][COLLECTION_NAME] if mongo_client else None
 
 # ---------------------------------------------------------
 # Lazy-loaded ML models (avoids OOM on Railway 512 MB free tier)
@@ -300,7 +308,7 @@ def rerank_documents(query: str, documents: list, top_k: int = RERANK_TOP_K) -> 
 # Free tier: 14,400 tokens/day.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    raise ValueError("CRITICAL: GROQ_API_KEY missing from .env — get a free key at https://console.groq.com")
+    _log.warning("GROQ_API_KEY missing — Groq LLM provider disabled")
 
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
@@ -308,7 +316,7 @@ llm = ChatGroq(
     streaming=True,
     max_retries=3,
     groq_api_key=GROQ_API_KEY,
-)
+) if GROQ_API_KEY else None
 
 # Provider 2: Cloudflare Workers AI — @cf/meta/llama-3.1-8b-instruct (first fallback)
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
@@ -336,6 +344,8 @@ async def _stream_groq(system_prompt: str, user_query: str):
     Uses direct message objects to avoid curly-brace escaping issues
     in code context that would break ChatPromptTemplate interpolation.
     """
+    if llm is None:
+        raise RuntimeError("Groq LLM not configured (missing GROQ_API_KEY)")
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_query)]
     async for chunk in llm.astream(messages):
         if chunk.content:
@@ -694,23 +704,8 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
         headers={"X-Cache": "MISS"},
     )
 
-# ---------------------------------------------------------
-# Ingestion API (Triggered by api-gateway BullMQ worker)
-# ---------------------------------------------------------
-@app.post("/api/ingest", status_code=202)
-async def trigger_ingestion(request: IngestRequest, current_user: str = Depends(get_current_user)):
-    """
-    Receives an ingestion request from the api-gateway's BullMQ worker 
-    and dispatches it to the Celery task queue.
-    """
-    _log.info("Dispatching Celery task", extra={"session_id": request.sessionId, "repo": request.repositoryUrl})
-    process_repository.delay(
-        payload={
-            "sessionId": request.sessionId,
-            "repositoryUrl": request.repositoryUrl
-        }
-    )
-    return {"message": "Ingestion started", "sessionId": request.sessionId}
+# NOTE: Duplicate /api/ingest route was removed.
+# The primary /api/ingest handler is defined at line ~423 above.
 
 # ---------------------------------------------------------
 # GAP-2 FIX: Session status polling endpoint
