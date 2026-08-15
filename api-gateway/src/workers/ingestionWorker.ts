@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const ragEngineUrl = process.env.RAG_ENGINE_URL || 'http://rag-engine:8000';
+const ragEngineUrl = process.env.RAG_ENGINE_URL || 'http://localhost:8000';
 const internalApiKey = process.env.INTERNAL_API_KEY || '';
 
 // Parse REDIS_URL for Upstash TLS support
