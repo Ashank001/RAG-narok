@@ -55,13 +55,9 @@ from jose import JWTError, jwt as jose_jwt
 # pyrefly: ignore [missing-import]
 from worker import process_repository
 
-# LangChain & AI Imports
-# pyrefly: ignore [missing-import]
-from langchain_huggingface import HuggingFaceEmbeddings
+# LangChain & AI Imports (heavy ML models are lazy-loaded below to avoid OOM on startup)
 # pyrefly: ignore [missing-import]
 from langchain_groq import ChatGroq
-# pyrefly: ignore [missing-import]
-from langchain_mongodb import MongoDBAtlasVectorSearch
 # pyrefly: ignore [missing-import]
 from langchain_core.prompts import ChatPromptTemplate
 # pyrefly: ignore [missing-import]
@@ -73,9 +69,7 @@ from pymongo import MongoClient
 # pyrefly: ignore [missing-import]
 import certifi
 
-# Cross-Encoder for reranking retrieved chunks
-# pyrefly: ignore [missing-import]
-from sentence_transformers import CrossEncoder
+# Cross-Encoder import moved to lazy loader (get_reranker) to save startup memory
 
 # Groq SDK — for RateLimitError detection in the fallback chain
 # pyrefly: ignore [missing-import]
@@ -203,41 +197,67 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 mongo_client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True)
 
 # IMPORTANT: Ensure these match what you set in your ingestion worker!
-DB_NAME = "rag_db" 
-COLLECTION_NAME = "code_vectors" 
+DB_NAME = "rag_db"
+COLLECTION_NAME = "code_vectors"
 collection = mongo_client[DB_NAME][COLLECTION_NAME]
 
-# Local CPU embedding model — no API key, no quota, 768-dim output.
-# BAAI/bge-base-en-v1.5 significantly outperforms MiniLM on code retrieval.
-# Must match the model used in worker.py and the Atlas index numDimensions (768).
-embeddings = HuggingFaceEmbeddings(
-    model_name="BAAI/bge-base-en-v1.5",
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True},
-)
-
-# Initialize MongoDB Atlas Vector Search integration
-vector_store = MongoDBAtlasVectorSearch(
-    collection=collection,
-    embedding=embeddings,
-    index_name="vector_index", # Name of the Atlas Search Index you will create
-    text_key="text",
-    embedding_key="embedding",
-)
-
 # ---------------------------------------------------------
-# Cross-Encoder Reranker (local CPU, no API calls)
+# Lazy-loaded ML models (avoids OOM on Railway 512 MB free tier)
+# Models are loaded on first request, not at startup.
 # ---------------------------------------------------------
-# After the bi-encoder retrieves top-K candidates, the cross-encoder
-# scores each (query, chunk) pair jointly for much higher precision.
-# Model: ms-marco-MiniLM-L-6-v2 — fast, accurate, runs on CPU.
 RERANK_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 RERANK_TOP_K = 5  # Keep top 5 after reranking
 RETRIEVAL_TOP_K = 20  # Retrieve top 20 candidates for reranking
 
-_log.info("Loading cross-encoder reranker", extra={"model": RERANK_MODEL_NAME})
-reranker = CrossEncoder(RERANK_MODEL_NAME, device="cpu")
-_log.info("Cross-encoder reranker loaded")
+_embeddings = None
+_reranker = None
+_vector_store = None
+
+
+def get_embeddings():
+    """Lazy-load the HuggingFace embedding model on first use."""
+    global _embeddings
+    if _embeddings is None:
+        _log.info("Lazy-loading embedding model", extra={"model": "BAAI/bge-base-en-v1.5"})
+        # pyrefly: ignore [missing-import]
+        from langchain_huggingface import HuggingFaceEmbeddings
+        _embeddings = HuggingFaceEmbeddings(
+            model_name="BAAI/bge-base-en-v1.5",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+        _log.info("Embedding model loaded")
+    return _embeddings
+
+
+def get_reranker():
+    """Lazy-load the cross-encoder reranker on first use."""
+    global _reranker
+    if _reranker is None:
+        _log.info("Lazy-loading cross-encoder reranker", extra={"model": RERANK_MODEL_NAME})
+        # pyrefly: ignore [missing-import]
+        from sentence_transformers import CrossEncoder
+        _reranker = CrossEncoder(RERANK_MODEL_NAME, device="cpu")
+        _log.info("Cross-encoder reranker loaded")
+    return _reranker
+
+
+def get_vector_store():
+    """Lazy-load the MongoDB Atlas Vector Search integration on first use."""
+    global _vector_store
+    if _vector_store is None:
+        _log.info("Lazy-loading vector store")
+        # pyrefly: ignore [missing-import]
+        from langchain_mongodb import MongoDBAtlasVectorSearch
+        _vector_store = MongoDBAtlasVectorSearch(
+            collection=collection,
+            embedding=get_embeddings(),
+            index_name="vector_index",
+            text_key="text",
+            embedding_key="embedding",
+        )
+        _log.info("Vector store loaded")
+    return _vector_store
 
 
 def rerank_documents(query: str, documents: list, top_k: int = RERANK_TOP_K) -> list:
@@ -259,7 +279,7 @@ def rerank_documents(query: str, documents: list, top_k: int = RERANK_TOP_K) -> 
     pairs = [(query, doc.page_content) for doc in documents]
 
     # Score all pairs in one batch (much faster than one-by-one)
-    scores = reranker.predict(pairs)
+    scores = get_reranker().predict(pairs)
 
     # Attach scores and sort descending
     scored_docs = sorted(
@@ -511,7 +531,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                 search_backoff = 3.0
                 for attempt in range(1, max_search_attempts + 1):
                     try:
-                        retrieved_docs = vector_store.similarity_search(
+                        retrieved_docs = get_vector_store().similarity_search(
                             user_query,
                             k=RETRIEVAL_TOP_K,
                             pre_filter={"session_id": {"$eq": session_id}},
