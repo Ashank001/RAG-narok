@@ -5,4 +5,6 @@ dockerfilePath = "Dockerfile"
 [deploy]
 startCommand = "sh start.sh"
 restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3
+
+[[services]]
+port = 8000
