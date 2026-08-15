@@ -51,9 +51,9 @@ from slowapi.errors import RateLimitExceeded
 # pyrefly: ignore [missing-import]
 from jose import JWTError, jwt as jose_jwt
 
-# Celery task import
-# pyrefly: ignore [missing-import]
-from worker import process_repository
+# Celery task import — LAZY-LOADED to avoid pulling in heavy ML libs at startup
+# (worker.py imports langchain, sentence_transformers, GitPython, etc.)
+# Imported on-demand inside the /api/ingest endpoint below.
 
 # LangChain & AI Imports (heavy ML models are lazy-loaded below to avoid OOM on startup)
 # pyrefly: ignore [missing-import]
@@ -436,6 +436,7 @@ async def ingest(request: IngestRequest, current_user: str = Depends(get_current
     Accepts a sessionId and repositoryUrl, dispatches the ingestion
     task to the Celery worker via Redis, and returns immediately.
     """
+    from worker import process_repository  # Lazy import — avoids loading heavy ML libs at startup
     process_repository.delay(
         payload={"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}
     )
