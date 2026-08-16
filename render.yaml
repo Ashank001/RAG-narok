@@ -42,7 +42,7 @@ services:
         value: "1"
 
   # ── RAG Worker (Celery only) ────────────────────────────
-  - type: worker
+  - type: web
     name: ragnarok-rag-worker
     runtime: docker
     plan: free

@@ -9,4 +9,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-CMD ["python", "-m", "celery", "-A", "worker", "worker", "--loglevel=info", "--concurrency=1"]
+# Run both a tiny health server AND Celery
+CMD ["sh", "-c", "python -c \"import http.server, threading; threading.Thread(target=lambda: http.server.HTTPServer(('0.0.0.0', int(__import__('os').environ.get('PORT', 10000))), http.server.BaseHTTPRequestHandler).serve_forever(), daemon=True).start()\" & celery -A worker worker --loglevel=info --concurrency=1"]
