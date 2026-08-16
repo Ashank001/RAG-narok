@@ -4,7 +4,7 @@ services:
     name: ragnarok-rag-api
     runtime: docker
     plan: free
-    dockerfilePath: ./Dockerfile.api
+    dockerfilePath: rag-engine/Dockerfile.api
     dockerContext: rag-engine
     healthCheckPath: /health
     envVars:
@@ -46,7 +46,7 @@ services:
     name: ragnarok-rag-worker
     runtime: docker
     plan: free
-    dockerfilePath: ./Dockerfile.worker
+    dockerfilePath: rag-engine/Dockerfile.worker
     dockerContext: rag-engine
     envVars:
       - key: MONGO_URI
