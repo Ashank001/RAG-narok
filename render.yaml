@@ -3,7 +3,7 @@ services:
   - type: web
     name: ragnarok-rag-engine
     runtime: docker
-    plan: starter
+    plan: free
     dockerfilePath: rag-engine/Dockerfile
     dockerContext: rag-engine
     healthCheckPath: /health
