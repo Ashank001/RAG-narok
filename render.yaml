@@ -4,10 +4,9 @@ services:
     name: ragnarok-rag-api
     runtime: docker
     plan: free
-    dockerfilePath: rag-engine/Dockerfile
+    dockerfilePath: rag-engine/Dockerfile.api
     dockerContext: rag-engine
     healthCheckPath: /health
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
     envVars:
       - key: MONGO_URI
         sync: false
@@ -47,9 +46,8 @@ services:
     name: ragnarok-rag-worker
     runtime: docker
     plan: free
-    dockerfilePath: rag-engine/Dockerfile
+    dockerfilePath: rag-engine/Dockerfile.worker
     dockerContext: rag-engine
-    startCommand: celery -A worker worker --loglevel=info --concurrency=1
     envVars:
       - key: MONGO_URI
         sync: false
@@ -60,10 +58,6 @@ services:
       - key: JWT_SECRET_KEY
         sync: false
       - key: INTERNAL_API_KEY
-        sync: false
-      - key: GITHUB_CLIENT_ID
-        sync: false
-      - key: GITHUB_CLIENT_SECRET
         sync: false
       - key: OPENBLAS_NUM_THREADS
         value: "1"
@@ -102,4 +96,3 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false
-        
