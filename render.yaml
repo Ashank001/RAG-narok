@@ -3,12 +3,13 @@ services:
   - type: web
     name: ragnarok-rag-engine
     runtime: docker
+    plan: starter
     dockerfilePath: rag-engine/Dockerfile
     dockerContext: rag-engine
     healthCheckPath: /health
     envVars:
       - key: MONGO_URI
-        sync: false
+        sync: false   
       - key: REDIS_URL
         sync: false
       - key: GROQ_API_KEY
@@ -29,7 +30,6 @@ services:
         sync: false
       - key: CLOUDFLARE_API_TOKEN
         sync: false
-      # Fixed values — performance tuning for 512 MB free tier
       - key: OPENBLAS_NUM_THREADS
         value: "1"
       - key: OMP_NUM_THREADS
@@ -43,6 +43,7 @@ services:
   - type: web
     name: ragnarok-api-gateway
     runtime: node
+    plan: free
     rootDir: api-gateway
     buildCommand: npm install && npm run build
     startCommand: npm start
