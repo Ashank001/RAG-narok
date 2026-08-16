@@ -32,7 +32,7 @@ def test_ingest_dispatches_celery_task(client, auth_headers_user_a):
     a background task. We mock the Celery .delay() call to verify it was
     invoked without actually running the Celery worker.
     """
-    with patch("main.process_repository") as mock_task:
+    with patch("worker.process_repository") as mock_task:
         mock_task.delay = MagicMock()
         resp = client.post(
             "/api/ingest",
@@ -159,8 +159,10 @@ def test_vector_isolation_user_cannot_read_other_session(client, auth_headers_us
                 return [bob_doc]
         return []  # Alice's session returns nothing
 
-    with patch("main.vector_store") as mock_vs:
-        mock_vs.similarity_search.side_effect = isolation_aware_search
+    mock_vs = MagicMock()
+    mock_vs.similarity_search.side_effect = isolation_aware_search
+
+    with patch("main.get_vector_store", return_value=mock_vs):
 
         # Alice queries HER session — must get 0 Bob documents
         alice_resp = client.post(
@@ -188,7 +190,7 @@ def test_ingest_requires_github_url(client, auth_headers_user_a):
     Test with a non-GitHub URL to confirm the task is dispatched or rejected.
     (Currently the backend dispatches all URLs; this test documents behavior.)
     """
-    with patch("main.process_repository") as mock_task:
+    with patch("worker.process_repository") as mock_task:
         mock_task.delay = MagicMock()
         resp = client.post(
             "/api/ingest",
