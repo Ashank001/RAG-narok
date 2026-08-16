@@ -30,8 +30,8 @@ import httpx
 # pyrefly: ignore [missing-import]
 from auth import create_access_token, get_current_user
 
-GITHUB_CLIENT_ID = os.getenv("OAUTH_ID")
-GITHUB_CLIENT_SECRET = os.getenv("OAUTH_SECRET_KEY")
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", os.getenv("OAUTH_ID"))
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", os.getenv("OAUTH_SECRET_KEY"))
 
 # pyrefly: ignore [missing-import]
 # ADDED: Depends
