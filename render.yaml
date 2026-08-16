@@ -1,15 +1,16 @@
 services:
-  # ── RAG Engine (Python FastAPI + Celery) ──────────────────
+  # ── RAG API (FastAPI only) ──────────────────────────────
   - type: web
-    name: ragnarok-rag-engine
+    name: ragnarok-rag-api
     runtime: docker
     plan: free
     dockerfilePath: rag-engine/Dockerfile
     dockerContext: rag-engine
     healthCheckPath: /health
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
     envVars:
       - key: MONGO_URI
-        sync: false   
+        sync: false
       - key: REDIS_URL
         sync: false
       - key: GROQ_API_KEY
@@ -38,8 +39,44 @@ services:
         value: /tmp
       - key: TRANSFORMERS_CACHE
         value: /tmp
+      - key: PYTHONUNBUFFERED
+        value: "1"
 
-  # ── API Gateway (Node.js Express) ────────────────────────
+  # ── RAG Worker (Celery only) ────────────────────────────
+  - type: worker
+    name: ragnarok-rag-worker
+    runtime: docker
+    plan: free
+    dockerfilePath: rag-engine/Dockerfile
+    dockerContext: rag-engine
+    startCommand: celery -A worker worker --loglevel=info --concurrency=1
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: INTERNAL_API_KEY
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: HF_HOME
+        value: /tmp
+      - key: TRANSFORMERS_CACHE
+        value: /tmp
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+  # ── API Gateway (Node.js Express) ──────────────────────
   - type: web
     name: ragnarok-api-gateway
     runtime: node
@@ -50,6 +87,8 @@ services:
     healthCheckPath: /health
     envVars:
       - key: MONGO_URI
+        sync: false
+      - key: MONGODB_URI
         sync: false
       - key: REDIS_URL
         sync: false
@@ -63,3 +102,4 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false
+        
