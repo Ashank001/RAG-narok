@@ -49,7 +49,7 @@ services:
     startCommand: npm start
     healthCheckPath: /health
     envVars:
-      - key: MONGODB_URI
+      - key: MONGO_URI
         sync: false
       - key: REDIS_URL
         sync: false
