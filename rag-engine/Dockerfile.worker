@@ -9,18 +9,18 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-# health_worker.py serves a tiny HTTP endpoint so Render's port scan passes
-RUN echo 'import os, threading, http.server\n\
+# health_server.py — blocking HTTP server so Render's port scan passes
+RUN printf 'import os, http.server\n\
 class H(http.server.BaseHTTPRequestHandler):\n\
     def do_GET(self):\n\
         self.send_response(200)\n\
         self.end_headers()\n\
-        self.wfile.write(b'"'"'{"status":"worker_ok"}'"'"')\n\
+        self.wfile.write(b\x27{"status":"worker_ok"}\x27)\n\
     def log_message(self, *a): pass\n\
 port = int(os.environ.get("PORT", 10000))\n\
-t = threading.Thread(target=lambda: http.server.HTTPServer(("0.0.0.0", port), H).serve_forever())\n\
-t.daemon = True\n\
-t.start()\n\
-print(f"Health server on port {port}")' > health_server.py
+print(f"Health server listening on port {port}")\n\
+http.server.HTTPServer(("0.0.0.0", port), H).serve_forever()\n' > health_server.py
 
-CMD ["sh", "-c", "python health_server.py & celery -A worker worker --loglevel=info --concurrency=1"]
+# Celery in background (--pool=solo avoids prefork doubling RAM)
+# Health server in foreground (keeps container alive + port open)
+CMD ["sh", "-c", "celery -A worker worker --loglevel=info --pool=solo --concurrency=1 & python health_server.py"]
