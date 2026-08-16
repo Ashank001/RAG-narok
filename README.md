@@ -113,7 +113,7 @@ Gemini's hosted embedding API hit per-minute AND per-day quotas during ingestion
 | Auth | GitHub OAuth 2.0, HS256 JWT |
 | Containerization | Docker, Docker Compose |
 | CI/CD | GitHub Actions |
-| Deployment | Vercel (frontend), Railway (backend) |
+| Deployment | Vercel (frontend), Render (backend) |
 
 ---
 
@@ -205,6 +205,10 @@ npm run dev
 ```
 
 Frontend runs at `http://localhost:3000`.
+
+### Render Free Tier
+
+> **Note:** Render free tier sleeps after 15 minutes of inactivity. First request after sleep takes 30–60 seconds while the AI models load. This is expected behavior on the free tier.
 
 ---
 

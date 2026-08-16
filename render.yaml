@@ -1,0 +1,64 @@
+services:
+  # ── RAG Engine (Python FastAPI + Celery) ──────────────────
+  - type: web
+    name: ragnarok-rag-engine
+    runtime: docker
+    dockerfilePath: rag-engine/Dockerfile
+    dockerContext: rag-engine
+    healthCheckPath: /health
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: INTERNAL_API_KEY
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      # Fixed values — performance tuning for 512 MB free tier
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: HF_HOME
+        value: /tmp
+      - key: TRANSFORMERS_CACHE
+        value: /tmp
+
+  # ── API Gateway (Node.js Express) ────────────────────────
+  - type: web
+    name: ragnarok-api-gateway
+    runtime: node
+    rootDir: api-gateway
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: PORT
+        value: "3001"
+      - key: RAG_ENGINE_URL
+        sync: false
+      - key: INTERNAL_API_KEY
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
