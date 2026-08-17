@@ -1,7 +1,7 @@
 services:
   # ── RAG API (FastAPI only) ──────────────────────────────
   - type: web
-    name: ragnarok-rag-api
+    name: ragnarok-rag-engine
     runtime: docker
     plan: free
     dockerfilePath: rag-engine/Dockerfile.api
