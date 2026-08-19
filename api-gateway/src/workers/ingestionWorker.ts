@@ -101,8 +101,21 @@ ingestionWorker.on('completed', (job) => {
   console.log(`[BullMQ Worker] Job ${job.id} completed successfully.`);
 });
 
-ingestionWorker.on('failed', (job, err) => {
+import { Session } from '../models/Session';
+
+ingestionWorker.on('failed', async (job, err) => {
   console.error(`[BullMQ Worker] Job ${job?.id} failed: ${err.message}`);
+  if (job?.data?.sessionId) {
+    try {
+      await Session.updateOne(
+        { sessionId: job.data.sessionId },
+        { $set: { status: 'failed', errorLog: err.message } }
+      );
+      console.log(`[BullMQ Worker] Updated session ${job.data.sessionId} to failed.`);
+    } catch (dbErr) {
+      console.error(`[BullMQ Worker] Failed to update session ${job.data.sessionId} status in DB:`, dbErr);
+    }
+  }
 });
 
 console.log(

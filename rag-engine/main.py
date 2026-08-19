@@ -435,9 +435,10 @@ async def ingest(request: IngestRequest, current_user: str = Depends(get_current
     Accepts a sessionId and repositoryUrl, dispatches the ingestion
     task to the Celery worker via Redis, and returns immediately.
     """
-    from worker import process_repository  # Lazy import — avoids loading heavy ML libs at startup
-    process_repository.delay(
-        payload={"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}
+    from config import celery_app
+    celery_app.send_task(
+        "process-repo",
+        kwargs={"payload": {"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}}
     )
     return JSONResponse(
         status_code=202,
