@@ -39,7 +39,7 @@ def get_sync_db():
     try:
         return sync_mongo_client.get_default_database()
     except Exception:
-        return sync_mongo_client.get_database("api-gateway")
+        return sync_mongo_client.get_database("test")
 
 def get_sync_collection(db_name: str, collection_name: str):
     return sync_mongo_client[db_name][collection_name]

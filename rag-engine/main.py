@@ -719,7 +719,7 @@ async def get_session_status(session_id: str, current_user: str = Depends(get_cu
     # api-gateway (Mongoose) and this service agree on.  The Atlas URI in
     # .env has no database path component, so get_default_database() would
     # throw and the old fallback was non-deterministic.
-    db = mongo_client.get_database("api-gateway")
+    db = mongo_client.get_database("test")
     session = db.sessions.find_one(
         {"sessionId": session_id},
         {"_id": 0, "sessionId": 1, "status": 1, "errorLog": 1}
