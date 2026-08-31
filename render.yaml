@@ -83,34 +83,6 @@ services:
       - key: PYTHONUNBUFFERED
         value: "1"
 
-  # ── RAG Worker (Celery only) ────────────────────────────
-  - type: web
-    name: ragnarok-rag-worker
-    runtime: docker
-    plan: free
-    dockerfilePath: rag-engine/Dockerfile.worker
-    dockerContext: rag-engine
-    envVars:
-      - key: MONGO_URI
-        sync: false
-      - key: REDIS_URL
-        sync: false
-      - key: GROQ_API_KEY
-        sync: false
-      - key: JWT_SECRET_KEY
-        sync: false
-      - key: INTERNAL_API_KEY
-        sync: false
-      - key: OPENBLAS_NUM_THREADS
-        value: "1"
-      - key: OMP_NUM_THREADS
-        value: "1"
-      - key: HF_HOME
-        value: /tmp
-      - key: TRANSFORMERS_CACHE
-        value: /tmp
-      - key: PYTHONUNBUFFERED
-        value: "1"
 
   # ── API Gateway (Node.js Express) ──────────────────────
   - type: web
