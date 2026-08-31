@@ -66,10 +66,11 @@ const statusHandler: RequestHandler = async (req: Request, res: Response): Promi
       return;
     }
 
-    // Return 200 with current status and errorLog
+    // Return 200 with current status and error
+    // Field is named "error" to match frontend IngestStatusResponse interface
     res.status(200).json({
       status: session.status,
-      errorLog: session.errorLog || null,
+      error: session.errorLog || null,
     });
   } catch (error) {
     console.error('Error fetching session status:', error);

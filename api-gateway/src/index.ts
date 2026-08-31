@@ -41,6 +41,27 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', service: 'API Gateway' });
 });
 
+// Diagnostic endpoint — reports runtime config (no secrets exposed)
+app.get('/health/debug', (req, res) => {
+  const ragUrl = process.env.RAG_ENGINE_URL || 'http://localhost:8000 (DEFAULT — NOT SET!)';
+  const redisUrl = process.env.REDIS_URL;
+  const redisInfo = redisUrl
+    ? `${new URL(redisUrl).hostname}:${new URL(redisUrl).port} (${redisUrl.startsWith('rediss:') ? 'TLS' : 'plain'})`
+    : `${process.env.REDIS_HOST || '127.0.0.1'}:${process.env.REDIS_PORT || '6379'} (local fallback)`;
+
+  res.status(200).json({
+    status: 'OK',
+    service: 'API Gateway',
+    config: {
+      RAG_ENGINE_URL: ragUrl,
+      REDIS: redisInfo,
+      INTERNAL_API_KEY_SET: Boolean(process.env.INTERNAL_API_KEY),
+      MONGO_URI_SET: Boolean(process.env.MONGO_URI),
+      CORS_ORIGINS: allowedOrigins,
+    },
+  });
+});
+
 // Initialize database connection and start Express server
 const startServer = async () => {
   try {
