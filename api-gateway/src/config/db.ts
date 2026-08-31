@@ -13,5 +13,6 @@ export const connectDB = async (): Promise<void> => {
   } catch (error) {
     console.error('Failed to connect to MongoDB cluster:', error);
     process.exit(1);
+    
   }
 };

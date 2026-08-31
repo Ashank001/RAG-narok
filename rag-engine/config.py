@@ -36,10 +36,10 @@ sync_mongo_client = MongoClient(
 )
 
 def get_sync_db():
-    try:
-        return sync_mongo_client.get_default_database()
-    except Exception:
-        return sync_mongo_client.get_database("test")
+    """Always use 'api-gateway' DB — must match the Mongoose connection
+    in api-gateway/src/config/db.ts so session status updates are visible
+    to the frontend (which polls via the API Gateway)."""
+    return sync_mongo_client.get_database("api-gateway")
 
 def get_sync_collection(db_name: str, collection_name: str):
     return sync_mongo_client[db_name][collection_name]

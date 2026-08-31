@@ -715,11 +715,9 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
 @app.get("/api/session/{session_id}")
 async def get_session_status(session_id: str, current_user: str = Depends(get_current_user)):
     """Returns the current ingestion status for a given session."""
-    # Bug #2 Fix: Always use the explicit database name that both the
-    # api-gateway (Mongoose) and this service agree on.  The Atlas URI in
-    # .env has no database path component, so get_default_database() would
-    # throw and the old fallback was non-deterministic.
-    db = mongo_client.get_database("test")
+    # Use the same database name as the API Gateway Mongoose connection
+    # (api-gateway) so we read sessions from the correct collection.
+    db = mongo_client.get_database("api-gateway")
     session = db.sessions.find_one(
         {"sessionId": session_id},
         {"_id": 0, "sessionId": 1, "status": 1, "errorLog": 1}
