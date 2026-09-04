@@ -66,6 +66,13 @@ const statusHandler: RequestHandler = async (req: Request, res: Response): Promi
       return;
     }
 
+    // Prevent browser/CDN caching — status changes frequently during ingestion.
+    // Without this, browsers return 304 (Not Modified) and the frontend
+    // never sees the status transition to "completed" or "failed".
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     // Return 200 with current status and error
     // Field is named "error" to match frontend IngestStatusResponse interface
     res.status(200).json({
