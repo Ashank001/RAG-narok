@@ -226,7 +226,7 @@ def get_embeddings():
     """Lazy-load the HuggingFace embedding model on first use."""
     global _embeddings
     if _embeddings is None:
-        model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
+        model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
         # pyrefly: ignore [missing-import]
         from langchain_huggingface import HuggingFaceEmbeddings
         _embeddings = HuggingFaceEmbeddings(

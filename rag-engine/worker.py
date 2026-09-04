@@ -47,8 +47,10 @@ from langchain_mongodb import MongoDBAtlasVectorSearch
 DB_NAME = "rag_db"
 COLLECTION_NAME = "code_vectors"
 ATLAS_INDEX_NAME = "vector_index"
-EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"  # Local CPU model; 768 dims; no API key or quota needed
-BATCH_SIZE = 50  # Local model has no rate limits; larger batches = faster ingestion
+# bge-small: 130 MB, 384 dims — fits in Render 512 MB free tier alongside FastAPI+Celery.
+# bge-base (438 MB, 768 dims) causes OOM on free tier; use bge-base only on paid plans.
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"  # 130 MB, 384 dims, no API key needed
+BATCH_SIZE = 32  # Smaller batches to keep peak RAM usage low on 512 MB containers
 
 # Repo size guard thresholds (configurable via env)
 MAX_REPO_SIZE_KB = int(os.getenv("MAX_REPO_SIZE_KB", "51200"))  # 50 MB
