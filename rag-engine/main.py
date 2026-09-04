@@ -430,7 +430,7 @@ def _get_available_providers():
 # 5. API Endpoints
 # ---------------------------------------------------------
 @app.post("/api/ingest", status_code=202)
-async def ingest(request: IngestRequest, current_user: str = Depends(get_current_user)):
+def ingest(request: IngestRequest, current_user: str = Depends(get_current_user)):
     """ Locked Down Ingestion route.
     Accepts a sessionId and repositoryUrl, dispatches the ingestion
     task to the Celery worker via Redis, and returns immediately.
