@@ -16,25 +16,15 @@ except Exception as e:
     print(f'Redis FAILED: {e}', flush=True)
 " 2>&1
 
-echo "[start.sh] Testing Celery worker import..."
-python -c "
-from config import celery_app
-print(f'Celery app: {celery_app.main}', flush=True)
-print(f'Broker: {celery_app.conf.broker_url[:30]}', flush=True)
-import worker
-print('worker.py imported OK', flush=True)
-" 2>&1
-
 echo "[start.sh] Starting Celery worker..."
-celery -A worker worker --loglevel=debug --pool=solo --concurrency=1 2>&1 &
+celery -A worker worker \
+    --loglevel=info \
+    --pool=solo \
+    --concurrency=1 \
+    --logfile=/dev/stdout 2>/dev/stdout &
+
 CELERY_PID=$!
-echo "[start.sh] Celery PID=$CELERY_PID. Waiting 10s to check if alive..."
-sleep 10
-if kill -0 $CELERY_PID 2>/dev/null; then
-    echo "[start.sh] Celery still running after 10s - OK"
-else
-    echo "[start.sh] CELERY CRASHED within 10 seconds"
-fi
+echo "[start.sh] Celery PID=$CELERY_PID"
 
 echo "[start.sh] Starting uvicorn..."
 uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}
