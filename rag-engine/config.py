@@ -23,9 +23,24 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
+    # --- TLS / SSL ---
     broker_use_ssl=ssl_options if redis_use_ssl else None,
     redis_backend_use_ssl=ssl_options if redis_use_ssl else None,
     broker_transport_options={"visibility_timeout": 3600},
+
+    # --- Reliability ---
+    # Retry broker connection on worker startup instead of crashing immediately
+    # when Redis is momentarily unavailable (e.g. Render cold-start).
+    broker_connection_retry_on_startup=True,
+
+    # Don't acknowledge the task until AFTER it finishes executing.
+    # If the worker crashes mid-task, the message stays in Redis and
+    # another worker (or the same one after restart) will pick it up.
+    task_acks_late=True,
+
+    # If the worker process is killed (OOM, SIGKILL), reject the task
+    # back to the queue so it can be retried, instead of silently losing it.
+    task_reject_on_worker_lost=True,
 )
 
 # MongoDB client

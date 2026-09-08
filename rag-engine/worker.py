@@ -6,6 +6,7 @@ import tempfile
 import sys
 import time
 import json
+import traceback
 import urllib.request
 import urllib.error
 
@@ -55,6 +56,7 @@ BATCH_SIZE = 32  # Smaller batches to keep peak RAM usage low on 512 MB containe
 # Repo size guard thresholds (configurable via env)
 MAX_REPO_SIZE_KB = int(os.getenv("MAX_REPO_SIZE_KB", "51200"))  # 50 MB
 MAX_FILE_COUNT_WARNING = int(os.getenv("MAX_FILE_COUNT_WARNING", "2000"))
+MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024  # 1 MB — skip files larger than this
 GITHUB_API_TIMEOUT = 8  # seconds
 
 # GitHub URL pattern — matches https://github.com/{owner}/{repo}
@@ -62,6 +64,56 @@ _GITHUB_URL_PATTERN = re.compile(
     r"^https://github\.com/([a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,98}[a-zA-Z0-9])?)"
     r"/([a-zA-Z0-9._-]{1,100})(?:\.git)?/?$"
 )
+
+# ---------------------------------------------------------
+# File Filter Constants (FIX 3)
+# ---------------------------------------------------------
+# Extensions and basenames that SHOULD be ingested
+SOURCE_CODE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
+    ".cpp", ".c", ".h", ".cs", ".rb", ".php", ".swift", ".kt",
+    ".scala", ".vue", ".html", ".css", ".scss",
+    ".md", ".json", ".yaml", ".yml", ".toml",
+    ".sh", ".bash", ".sql", ".r",
+    ".txt", ".dockerfile",
+}
+
+# Basenames (exact filename match) that should be included even if
+# their extension isn't in SOURCE_CODE_EXTENSIONS
+SOURCE_CODE_BASENAMES = {
+    "dockerfile", ".env.example", "makefile", "cmakelists.txt",
+    "rakefile", "gemfile", "procfile",
+}
+
+# Directories to always skip
+EXCLUDED_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    "dist", "build", ".next", ".nuxt", ".output",
+    "vendor", "target", "bin", "obj",
+    ".tox", ".mypy_cache", ".pytest_cache",
+    ".idea", ".vscode",
+}
+
+# Binary / generated extensions to always skip
+EXCLUDED_EXTENSIONS = {
+    ".pyc", ".pyo", ".class", ".o", ".obj",
+    ".exe", ".dll", ".so", ".dylib", ".a", ".lib",
+    ".wasm", ".jar", ".war", ".ear",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg", ".webp",
+    ".mp3", ".mp4", ".wav", ".avi", ".mov",
+    ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx",
+    ".db", ".sqlite", ".sqlite3",
+    ".min.js", ".min.css",
+}
+
+# Lock files to always skip
+EXCLUDED_BASENAMES = {
+    "package-lock.json", "yarn.lock", "poetry.lock",
+    "pipfile.lock", "pnpm-lock.yaml", "composer.lock",
+    "cargo.lock", "gemfile.lock",
+}
 
 
 # ---------------------------------------------------------
@@ -258,17 +310,20 @@ def _check_repo_size(repo_url: str, session_id: str) -> dict:
 
 
 # ---------------------------------------------------------
-# Core Ingestion Logic
+# Session Status Helpers (FIX 4)
 # ---------------------------------------------------------
-def update_session_status(session_id: str, status: str, error_log: str | None = None) -> None:
+def update_session_status(session_id: str, status: str, error_log: str | None = None,
+                          message: str = "") -> None:
     """
     Updates the session document in MongoDB with the current processing status.
     Uses the synchronous PyMongo client to avoid 'Event loop is closed' errors
     inside Celery worker processes.
-    Optionally attaches an error log on failure.
+    Optionally attaches an error log on failure and a human-readable statusMessage.
     """
     db = get_sync_db()
-    update_fields = {"status": status}
+    update_fields: dict = {"status": status}
+    if message:
+        update_fields["statusMessage"] = message
     if error_log:
         update_fields["errorLog"] = error_log
         db.sessions.update_one(
@@ -277,19 +332,72 @@ def update_session_status(session_id: str, status: str, error_log: str | None = 
             upsert=True
         )
     else:
+        unset_fields: dict = {"errorLog": ""}
+        if not message:
+            # Only unset statusMessage if we're not explicitly setting one
+            pass
         db.sessions.update_one(
             {"sessionId": session_id},
-            {"$set": update_fields, "$unset": {"errorLog": ""}},
+            {"$set": update_fields, "$unset": unset_fields},
             upsert=True
         )
 
 
+# ---------------------------------------------------------
+# File Filter (FIX 3)
+# ---------------------------------------------------------
+def is_source_file(file_path: str) -> bool:
+    """
+    Determines whether a file should be included in the ingestion pipeline.
+
+    Accepts common source code, config, and documentation files.
+    Rejects binaries, lock files, build artifacts, and files > 1 MB.
+
+    Args:
+        file_path: Relative path of the file within the cloned repository.
+
+    Returns:
+        True if the file should be ingested, False otherwise.
+    """
+    name = file_path.lower()
+    parts = name.replace("\\", "/").split("/")
+
+    # 1. Exclude files inside blocked directories
+    if EXCLUDED_DIRS.intersection(parts):
+        return False
+
+    basename = os.path.basename(name)
+
+    # 2. Exclude lock files by exact basename
+    if basename in EXCLUDED_BASENAMES:
+        return False
+
+    # 3. Exclude binary/generated extensions
+    ext = os.path.splitext(basename)[1]
+    if ext in EXCLUDED_EXTENSIONS:
+        return False
+
+    # 4. Include by exact basename match (e.g. .env.example, Dockerfile)
+    if basename in SOURCE_CODE_BASENAMES:
+        return True
+
+    # 5. Include by extension
+    if ext in SOURCE_CODE_EXTENSIONS:
+        return True
+
+    # 6. Reject everything else (unknown extensions, extensionless files, etc.)
+    return False
+
+
+# ---------------------------------------------------------
+# Core Ingestion Logic
+# ---------------------------------------------------------
 def ingest_repository(session_id: str, repo_url: str) -> dict:
     """
     Synchronous ingestion pipeline:
     1. Clones the repository to a temporary OS-safe directory using GitLoader.
     2. Splits loaded files into chunks using RecursiveCharacterTextSplitter.
-    3. Generates vector embeddings using HuggingFaceEmbeddings (BAAI/bge-base-en-v1.5, 768 dims).
+    3. Generates vector embeddings using HuggingFaceEmbeddings (BAAI/bge-small-en-v1.5, 384 dims).
     4. Uploads embedded documents to MongoDB Atlas Vector Search (rag_db.code_vectors).
     5. Cleans up the temporary clone directory.
 
@@ -303,31 +411,8 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 1: Clone the repository
         # --------------------------------------------------
-        # GAP-12 FIX: Only embed source code. Binaries, lock files, and
-        # media produce garbage vectors and burn embedding API quota.
-        SOURCE_CODE_EXTENSIONS = {
-            ".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".go", ".rs",
-            ".cpp", ".c", ".h", ".cs", ".rb", ".php", ".swift", ".kt",
-            ".scala", ".r", ".sh", ".bash", ".sql", ".html", ".css",
-            ".scss", ".yaml", ".yml", ".toml", ".json", ".md", ".txt",
-            ".env.example", ".dockerfile", "dockerfile",
-        }
-
-        def is_source_file(file_path: str) -> bool:
-            name = file_path.lower()
-            # Exclude lock files specifically
-            if any(name.endswith(lf) for lf in ["package-lock.json", "yarn.lock", "poetry.lock", "pipfile.lock", "pnpm-lock.yaml"]):
-                return False
-            # Exclude hidden/vendor/build directories
-            if any(seg in name.split("/") for seg in [".git", "node_modules", "__pycache__", ".venv", "dist", "build", ".next"]):
-                return False
-            import os as _os
-            ext = _os.path.splitext(file_path)[1].lower()
-            base = _os.path.basename(file_path).lower()
-            return ext in SOURCE_CODE_EXTENSIONS or base in SOURCE_CODE_EXTENSIONS
-
-        log.info("Cloning repository", extra={"repo_url": repo_url})
-        log.debug("Temp directory", extra={"temp_path": repo_path})
+        log.info("Starting clone...", extra={"repo_url": repo_url})
+        update_session_status(session_id, "processing", message="Cloning repository...")
 
         # --------------------------------------------------
         # Step 0: Repo size guard — reject oversized repos
@@ -342,34 +427,76 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             )
             default_branch = repo.active_branch.name
             log.info("Repository cloned", extra={"branch": default_branch, "depth": 1})
-            
-            loader = GitLoader(
-                repo_path=repo_path,
-                branch=default_branch,
-                file_filter=is_source_file,
-            )
-            docs = loader.load()
         except Exception as clone_err:
             log.error("Clone failed", extra={"error": str(clone_err)})
             raise clone_err
 
-        log.info("Source files loaded", extra={"file_count": len(docs)})
+        # Count all files before filtering (for diagnostics)
+        all_files = []
+        for root, dirs, files in os.walk(repo_path):
+            # Skip .git directory during walk
+            dirs[:] = [d for d in dirs if d != ".git"]
+            for f in files:
+                all_files.append(os.path.join(root, f))
+
+        log.info("Clone complete, %d files found", len(all_files),
+                 extra={"total_files_in_repo": len(all_files)})
+
+        # --------------------------------------------------
+        # Step 1b: Filter and load files
+        # --------------------------------------------------
+        update_session_status(session_id, "processing", message="Filtering files...")
+
+        loader = GitLoader(
+            repo_path=repo_path,
+            branch=default_branch,
+            file_filter=is_source_file,
+        )
+        docs = loader.load()
+
+        # Apply 1 MB file-size guard: drop documents whose source file is too large
+        oversized_count = 0
+        filtered_docs = []
+        for doc in docs:
+            source = doc.metadata.get("source", "")
+            full_path = os.path.join(repo_path, source) if source else ""
+            if full_path and os.path.isfile(full_path):
+                if os.path.getsize(full_path) > MAX_FILE_SIZE_BYTES:
+                    oversized_count += 1
+                    continue
+            filtered_docs.append(doc)
+        docs = filtered_docs
+
+        log.info("After filtering, %d files remain", len(docs),
+                 extra={
+                     "files_after_filter": len(docs),
+                     "oversized_skipped": oversized_count,
+                 })
 
         if not docs:
-            raise ValueError("Repository cloned but contained no loadable documents.")
+            raise ValueError(
+                "No source files found in repository. "
+                "The repository may contain only binary files, lock files, or unsupported formats."
+            )
 
         # --------------------------------------------------
         # Step 2: Split documents into chunks
         # --------------------------------------------------
+        update_session_status(session_id, "processing",
+                              message=f"Splitting {len(docs)} files into chunks...")
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
         )
         chunks = splitter.split_documents(docs)
-        log.info("Documents split into chunks", extra={"chunk_count": len(chunks)})
+        log.info("Chunking complete, %d chunks created", len(chunks),
+                 extra={"chunk_count": len(chunks)})
 
         if not chunks:
-            raise ValueError("Document splitting produced zero chunks.")
+            raise ValueError(
+                "Document splitting produced zero chunks. "
+                "Files may be empty or contain only whitespace."
+            )
 
         # Enrich each chunk's metadata with the session ID for traceability
         for chunk in chunks:
@@ -379,6 +506,8 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 3: Initialize embedding model
         # --------------------------------------------------
+        update_session_status(session_id, "processing",
+                              message=f"Embedding {len(chunks)} chunks...")
         log.info("Initializing embedding model", extra={"model": EMBEDDING_MODEL})
         embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL,
@@ -390,6 +519,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 4: Upload to MongoDB Atlas Vector Search
         # --------------------------------------------------
+        update_session_status(session_id, "processing", message="Storing vectors...")
         log.info("Connecting to MongoDB Atlas", extra={"db": DB_NAME, "collection": COLLECTION_NAME})
         collection = get_sync_collection(DB_NAME, COLLECTION_NAME)
 
@@ -436,7 +566,9 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
 
             # No sleep needed — local model has no API rate limits
 
-        log.info("Vectors uploaded to Atlas", extra={"vectors_uploaded": total_uploaded})
+        log.info("Embedding complete")
+        log.info("Stored %d vectors in MongoDB", total_uploaded,
+                 extra={"vectors_uploaded": total_uploaded})
 
         return {
             "files_loaded": len(docs),
@@ -457,7 +589,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
 
 
 # ---------------------------------------------------------
-# Celery Task Definition
+# Celery Task Definition (FIX 1 + FIX 4)
 # ---------------------------------------------------------
 @celery_app.task(name="process-repo", bind=True, max_retries=2)
 def process_repository(self, payload: dict | None = None, sessionId: str | None = None, repositoryUrl: str | None = None) -> dict:
@@ -477,34 +609,67 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
         repo_url = repo_url or payload.get("repositoryUrl")
 
     if not session_id or not repo_url:
+        _log.error(
+            "Missing required arguments",
+            extra={
+                "sessionId": session_id,
+                "repositoryUrl": repo_url,
+                "payload": str(payload),
+            },
+        )
         raise ValueError(
             f"Missing required arguments: sessionId='{session_id}', "
             f"repositoryUrl='{repo_url}' in payload='{payload}'"
         )
 
     log = get_logger(__name__, session_id=session_id)
-    # Update session status to 'processing'
-    update_session_status(session_id, "processing")
-    log.info("Task started", extra={"repo_url": repo_url})
 
+    # --- FIX 1 + FIX 4: Wrap entire body with comprehensive logging ---
     try:
+        # Update session status to 'processing'
+        update_session_status(session_id, "processing", message="Cloning repository...")
+        log.info("Task started", extra={
+            "repo_url": repo_url,
+            "celery_task_id": self.request.id,
+            "retry": self.request.retries,
+        })
+
         # Execute the full ingestion pipeline
         result = ingest_repository(session_id, repo_url)
 
-        # Mark session as completed
-        update_session_status(session_id, "completed")
-        log.info("Task completed", extra={"result": result})
+        # Mark session as completed with "Ready" message
+        update_session_status(session_id, "completed", message="Ready")
+        log.info("Task complete", extra={"result": result})
         return result
 
     except Exception as exc:
+        # --- FIX 1: Log FULL traceback, not just str(exc) ---
+        full_tb = traceback.format_exc()
         error_msg = str(exc)
-        log.error("Task failed", extra={"error": error_msg})
+        log.error(
+            "Task failed with exception",
+            extra={
+                "error": error_msg,
+                "traceback": full_tb,
+                "celery_task_id": self.request.id,
+                "retry": self.request.retries,
+                "max_retries": self.max_retries,
+            },
+        )
+
+        # Print traceback to stderr as well — guarantees it shows in Render logs
+        # even if JSON logger output is somehow swallowed.
+        print(f"[CELERY TASK FAILED] session={session_id}\n{full_tb}", file=sys.stderr, flush=True)
 
         # Only mark the session as permanently failed when all retries are
         # exhausted. During retry cycles, keep the status as "processing" so
         # the frontend doesn't show a false failure that later disappears.
         if self.request.retries >= self.max_retries:
-            update_session_status(session_id, "failed", error_log=error_msg)
+            update_session_status(
+                session_id, "failed",
+                error_log=error_msg,
+                message=error_msg,
+            )
         else:
             log.warning("Retry scheduled", extra={"retry": self.request.retries + 1, "max_retries": self.max_retries})
 

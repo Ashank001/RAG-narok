@@ -720,7 +720,7 @@ async def get_session_status(session_id: str, current_user: str = Depends(get_cu
     db = mongo_client.get_database("api-gateway")
     session = db.sessions.find_one(
         {"sessionId": session_id},
-        {"_id": 0, "sessionId": 1, "status": 1, "errorLog": 1}
+        {"_id": 0, "sessionId": 1, "status": 1, "errorLog": 1, "statusMessage": 1}
     )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
