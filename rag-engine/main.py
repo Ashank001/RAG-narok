@@ -431,21 +431,20 @@ def _get_available_providers():
 # ---------------------------------------------------------
 @app.post("/api/ingest", status_code=202)
 def ingest(request: IngestRequest, current_user: str = Depends(get_current_user)):
-    """ Locked Down Ingestion route.
-    Accepts a sessionId and repositoryUrl, dispatches the ingestion
-    task to the Celery worker via Redis, and returns immediately.
-    """
     from config import celery_app
-    celery_app.send_task(
-        "process-repo",
-        kwargs={"payload": {"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}}
-    )
+    import logging
+    logging.warning(f"INGEST CALLED: session={request.sessionId} user={current_user}")
+    try:
+        result = celery_app.send_task(
+            "process-repo",
+            kwargs={"payload": {"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}}
+        )
+        logging.warning(f"TASK DISPATCHED: task_id={result.id}")
+    except Exception as e:
+        logging.error(f"SEND_TASK FAILED: {e}")
     return JSONResponse(
         status_code=202,
-        content={
-            "message": "Ingestion started in the background.",
-            "sessionId": request.sessionId,
-        },
+        content={"message": "Ingestion started in the background.", "sessionId": request.sessionId}
     )
 
 @app.get("/health")
