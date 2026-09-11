@@ -57,8 +57,9 @@ export default function IngestPanel({ onSessionReady, onError }: IngestPanelProp
           } else if (data.status === "failed") {
             if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
           }
-        } catch {
-          // Silent fail — keep polling
+        } catch (err) {
+          console.error("Error polling ingest status for session", sessionId, err);
+          // Keep polling, but now we can see if it's failing
         }
       }, 2000);
     },

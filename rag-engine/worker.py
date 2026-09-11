@@ -320,27 +320,33 @@ def update_session_status(session_id: str, status: str, error_log: str | None = 
     inside Celery worker processes.
     Optionally attaches an error log on failure and a human-readable statusMessage.
     """
-    db = get_sync_db()
-    update_fields: dict = {"status": status}
-    if message:
-        update_fields["statusMessage"] = message
-    if error_log:
-        update_fields["errorLog"] = error_log
-        db.sessions.update_one(
-            {"sessionId": session_id},
-            {"$set": update_fields},
-            upsert=True
-        )
-    else:
-        unset_fields: dict = {"errorLog": ""}
-        if not message:
-            # Only unset statusMessage if we're not explicitly setting one
-            pass
-        db.sessions.update_one(
-            {"sessionId": session_id},
-            {"$set": update_fields, "$unset": unset_fields},
-            upsert=True
-        )
+    log = get_logger(__name__, session_id=session_id)
+    log.info(f"Attempting to update session status to '{status}'", extra={"session_id": session_id, "status": status})
+    try:
+        db = get_sync_db()
+        update_fields: dict = {"status": status}
+        if message:
+            update_fields["statusMessage"] = message
+        if error_log:
+            update_fields["errorLog"] = error_log
+            db.sessions.update_one(
+                {"sessionId": session_id},
+                {"$set": update_fields},
+                upsert=True
+            )
+        else:
+            unset_fields: dict = {"errorLog": ""}
+            if not message:
+                # Only unset statusMessage if we're not explicitly setting one
+                pass
+            db.sessions.update_one(
+                {"sessionId": session_id},
+                {"$set": update_fields, "$unset": unset_fields},
+                upsert=True
+            )
+        log.info(f"Successfully updated session status to '{status}'", extra={"session_id": session_id, "status": status})
+    except Exception as e:
+        log.error(f"Failed to update session status to '{status}'", extra={"session_id": session_id, "status": status, "error": str(e)})
 
 
 # ---------------------------------------------------------
@@ -638,7 +644,12 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
         result = ingest_repository(session_id, repo_url)
 
         # Mark session as completed with "Ready" message
-        update_session_status(session_id, "completed", message="Ready")
+        try:
+            update_session_status(session_id, "completed", message="Ready")
+            log.info("Session status explicitly updated to completed", extra={"session_id": session_id})
+        except Exception as e:
+            log.error("Failed to update session status to completed in process_repository", extra={"session_id": session_id, "error": str(e)})
+            
         log.info("Task complete", extra={"result": result})
         return result
 

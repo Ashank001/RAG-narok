@@ -114,7 +114,7 @@ async function postJsonWithRetry(
     try {
       const { statusCode, data } = await postJson(url, body, headers);
 
-      if (statusCode < 400) {
+      if (statusCode >= 200 && statusCode < 300) {
         return data; // Success
       }
 

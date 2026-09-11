@@ -78,6 +78,7 @@ const statusHandler: RequestHandler = async (req: Request, res: Response): Promi
     res.status(200).json({
       status: session.status,
       error: session.errorLog || null,
+      message: session.statusMessage || undefined,
     });
   } catch (error) {
     console.error('Error fetching session status:', error);

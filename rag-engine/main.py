@@ -432,19 +432,43 @@ def _get_available_providers():
 @app.post("/api/ingest", status_code=202)
 def ingest(request: IngestRequest, current_user: str = Depends(get_current_user)):
     from config import celery_app
-    import logging
-    logging.warning(f"INGEST CALLED: session={request.sessionId} user={current_user}")
+
+    _log.info("Ingest requested", extra={
+        "session_id": request.sessionId,
+        "repo_url": request.repositoryUrl,
+        "user": current_user,
+    })
+
     try:
         result = celery_app.send_task(
             "process-repo",
             kwargs={"payload": {"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}}
         )
-        logging.warning(f"TASK DISPATCHED: task_id={result.id}")
+        _log.info("Celery task dispatched", extra={
+            "session_id": request.sessionId,
+            "task_id": result.id,
+        })
     except Exception as e:
-        logging.error(f"SEND_TASK FAILED: {e}")
+        _log.error("Failed to dispatch Celery task", extra={
+            "session_id": request.sessionId,
+            "error": str(e),
+        })
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "Failed to start ingestion task. Please try again later.",
+                "detail": str(e),
+                "sessionId": request.sessionId,
+            }
+        )
+
     return JSONResponse(
         status_code=202,
-        content={"message": "Ingestion started in the background.", "sessionId": request.sessionId}
+        content={
+            "message": "Ingestion started in the background.",
+            "sessionId": request.sessionId,
+            "taskId": result.id,
+        }
     )
 
 @app.get("/health")

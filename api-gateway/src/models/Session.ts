@@ -5,6 +5,7 @@ export interface ISession extends Document {
   repositoryUrl: string;
   status: 'queued' | 'processing' | 'completed' | 'failed';
   errorLog?: string;
+  statusMessage?: string;
   createdAt: Date;
 }
 
@@ -26,6 +27,9 @@ const SessionSchema: Schema = new Schema<ISession>({
     required: true
   },
   errorLog: { 
+    type: String 
+  },
+  statusMessage: { 
     type: String 
   },
   createdAt: { 
