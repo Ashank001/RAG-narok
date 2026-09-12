@@ -324,27 +324,45 @@ def update_session_status(session_id: str, status: str, error_log: str | None = 
     log.info(f"Attempting to update session status to '{status}'", extra={"session_id": session_id, "status": status})
     try:
         db = get_sync_db()
+        db_name = db.name
+        log.info(f"update_session_status: using db='{db_name}', collection='sessions'", extra={
+            "session_id": session_id, "db_name": db_name,
+        })
+
         update_fields: dict = {"status": status}
         if message:
             update_fields["statusMessage"] = message
+
         if error_log:
             update_fields["errorLog"] = error_log
-            db.sessions.update_one(
+            result = db.sessions.update_one(
                 {"sessionId": session_id},
                 {"$set": update_fields},
-                upsert=True
             )
         else:
             unset_fields: dict = {"errorLog": ""}
-            if not message:
-                # Only unset statusMessage if we're not explicitly setting one
-                pass
-            db.sessions.update_one(
+            result = db.sessions.update_one(
                 {"sessionId": session_id},
                 {"$set": update_fields, "$unset": unset_fields},
-                upsert=True
             )
-        log.info(f"Successfully updated session status to '{status}'", extra={"session_id": session_id, "status": status})
+
+        log.info(
+            f"update_one result for status='{status}'",
+            extra={
+                "session_id": session_id,
+                "matched_count": result.matched_count,
+                "modified_count": result.modified_count,
+                "upserted_id": str(result.upserted_id) if result.upserted_id else None,
+            },
+        )
+
+        if result.matched_count == 0:
+            log.error(
+                f"SESSION NOT FOUND in MongoDB! update_one matched 0 documents. "
+                f"Filter: {{sessionId: '{session_id}'}} in db='{db_name}', collection='sessions'.",
+                extra={"session_id": session_id, "db_name": db_name, "status": status},
+            )
+
     except Exception as e:
         log.error(f"Failed to update session status to '{status}'", extra={"session_id": session_id, "status": status, "error": str(e)})
 
