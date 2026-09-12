@@ -346,22 +346,10 @@ def update_session_status(session_id: str, status: str, error_log: str | None = 
                 {"$set": update_fields, "$unset": unset_fields},
             )
 
-        log.info(
-            f"update_one result for status='{status}'",
-            extra={
-                "session_id": session_id,
-                "matched_count": result.matched_count,
-                "modified_count": result.modified_count,
-                "upserted_id": str(result.upserted_id) if result.upserted_id else None,
-            },
-        )
-
         if result.matched_count == 0:
-            log.error(
-                f"SESSION NOT FOUND in MongoDB! update_one matched 0 documents. "
-                f"Filter: {{sessionId: '{session_id}'}} in db='{db_name}', collection='sessions'.",
-                extra={"session_id": session_id, "db_name": db_name, "status": status},
-            )
+            log.error(f"NO SESSION FOUND for {session_id}")
+        else:
+            log.info(f"Session {session_id} → {status}")
 
     except Exception as e:
         log.error(f"Failed to update session status to '{status}'", extra={"session_id": session_id, "status": status, "error": str(e)})

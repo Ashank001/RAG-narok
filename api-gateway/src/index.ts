@@ -62,6 +62,17 @@ app.get('/health/debug', (req, res) => {
   });
 });
 
+// Keep rag-engine warm — ping every 10 minutes
+const RAG_ENGINE_URL = process.env.RAG_ENGINE_URL || 'http://localhost:8000';
+setInterval(async () => {
+  try {
+    await fetch(`${RAG_ENGINE_URL}/health`);
+    console.log('[Keep-alive] RAG engine pinged successfully');
+  } catch (e) {
+    console.log('[Keep-alive] RAG engine ping failed:', e);
+  }
+}, 10 * 60 * 1000); // every 10 minutes
+
 // Initialize database connection and start Express server
 const startServer = async () => {
   try {
