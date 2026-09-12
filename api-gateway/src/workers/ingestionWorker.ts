@@ -55,7 +55,7 @@ interface IngestJobData {
   repositoryUrl: string;
 }
 
-function postJson(url: string, body: object, headers: Record<string, string>): Promise<{ statusCode: number; data: string }> {
+function postJson(url: string, body: object, headers: Record<string, string>): Promise<{ statusCode: number; data: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const parsed = new URL(url);
@@ -67,6 +67,7 @@ function postJson(url: string, body: object, headers: Record<string, string>): P
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
+        'User-Agent': 'ragnarok-api-gateway-worker/1.0',
         ...headers,
       },
       // 60-second timeout for cold-start scenarios on Render free tier
@@ -78,7 +79,7 @@ function postJson(url: string, body: object, headers: Record<string, string>): P
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
-        resolve({ statusCode: res.statusCode ?? 0, data });
+        resolve({ statusCode: res.statusCode ?? 0, data, headers: res.headers });
       });
     });
 
@@ -112,14 +113,17 @@ async function postJsonWithRetry(
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const { statusCode, data } = await postJson(url, body, headers);
+      const { statusCode, data, headers: resHeaders } = await postJson(url, body, headers);
 
       if (statusCode >= 200 && statusCode < 300) {
         return data; // Success
       }
 
-      // Retryable: 429 (rate limit / cold-start) or 5xx (server error)
+      // TEMP LOGGING: Log headers and body if we get a 429 or 500
       if (statusCode === 429 || statusCode >= 500) {
+        console.warn(`[DEBUG 429/5xx] Attempt ${attempt} got ${statusCode}. Headers:`, JSON.stringify(resHeaders));
+        console.warn(`[DEBUG 429/5xx] Body snippet:`, data.substring(0, 500));
+        
         lastError = new Error(`FastAPI responded with ${statusCode}: ${data}`);
         if (attempt < maxRetries) {
           console.warn(
@@ -132,6 +136,8 @@ async function postJsonWithRetry(
       }
 
       // Non-retryable 4xx error (401, 403, etc.)
+      console.error(`[DEBUG 4xx] Attempt ${attempt} got ${statusCode}. Headers:`, JSON.stringify(resHeaders));
+      console.error(`[DEBUG 4xx] Body snippet:`, data.substring(0, 500));
       throw new Error(`FastAPI responded with ${statusCode}: ${data}`);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
