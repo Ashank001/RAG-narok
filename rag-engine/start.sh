@@ -8,25 +8,32 @@ export MALLOC_TRIM_THRESHOLD_=100000
 echo "[start.sh] Redis check..."
 
 python -c "
-import os, ssl, redis
-url = os.getenv('REDIS_URL')
-print('[start.sh] REDIS_URL exists:', bool(url), flush=True)
-print('[start.sh] REDIS_URL prefix:', url[:12] if url else 'MISSING', flush=True)
+import os
+import ssl
+import redis
 
-r = redis.from_url(url, ssl_cert_reqs=ssl.CERT_NONE)
+print('[start.sh] REDIS_URL exists:', bool(os.getenv('REDIS_URL')), flush=True)
+print('[start.sh] REDIS_URL prefix:', os.getenv('REDIS_URL', '')[:12], flush=True)
+
+r = redis.from_url(
+    os.getenv('REDIS_URL'),
+    ssl_cert_reqs=ssl.CERT_NONE
+)
+
 r.ping()
 print('[start.sh] Redis OK', flush=True)
 "
 
 echo "[start.sh] Starting Celery..."
 
-python -u -m celery -A worker worker \
-    --loglevel=DEBUG \
+python -m celery -A worker worker \
+    --loglevel=INFO \
     --pool=solo \
     --concurrency=1 \
-    --hostname=ragworker@%h &
+    > /tmp/celery.log 2>&1 &
 
 CELERY_PID=$!
+
 echo "[start.sh] Celery PID=$CELERY_PID"
 
 sleep 10
@@ -35,14 +42,19 @@ if kill -0 "$CELERY_PID" 2>/dev/null; then
     echo "[start.sh] ✅ CELERY PROCESS IS ALIVE"
 else
     echo "[start.sh] ❌ CELERY PROCESS DIED"
+    cat /tmp/celery.log
     exit 1
 fi
 
-echo "[start.sh] Checking Celery worker..."
+echo "[start.sh] ===== CELERY LOG ====="
+cat /tmp/celery.log
+echo "[start.sh] ====================="
 
-python -m celery -A worker inspect ping || true
-python -m celery -A worker inspect registered || true
+echo "[start.sh] Process memory:"
+ps -o pid,ppid,rss,vsz,comm,args
 
-echo "[start.sh] Starting Uvicorn..."
+echo "[start.sh] Starting FastAPI..."
 
-exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}
+exec uvicorn main:app \
+    --host 0.0.0.0 \
+    --port ${PORT:-10000}
