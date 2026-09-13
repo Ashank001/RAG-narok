@@ -22,16 +22,11 @@ load_dotenv()
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-import git
-
-# pyrefly: ignore [missing-import]
-from config import celery_app, get_sync_db, get_sync_collection
 # pyrefly: ignore [missing-import]
 from logger import get_logger
 
 # Module-level logger (no session bound at import time)
 _log = get_logger(__name__)
-
 
 def log_memory(label, logger=None):
     """Log Linux RSS memory usage (reads /proc/self/status). Fail-safe."""
@@ -49,15 +44,39 @@ def log_memory(label, logger=None):
     except Exception as e:
         _l.warning(f"Could not read memory usage: {e}")
 
+log_memory("IMPORT START")
+
+log_memory("BEFORE import git")
+import git
+log_memory("AFTER import git")
+
+log_memory("BEFORE config imports")
+# pyrefly: ignore [missing-import]
+from config import celery_app, get_sync_db, get_sync_collection
+log_memory("AFTER config imports")
+
 # LangChain Imports — AFTER load_dotenv() so thread limits are active
+log_memory("BEFORE langchain_community.document_loaders")
 # pyrefly: ignore [missing-import]
 from langchain_community.document_loaders import GitLoader
+log_memory("AFTER langchain_community.document_loaders")
+
+log_memory("BEFORE langchain_text_splitters")
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+log_memory("AFTER langchain_text_splitters")
+
+log_memory("BEFORE langchain_huggingface")
 # pyrefly: ignore [missing-import]
 from langchain_huggingface import HuggingFaceEmbeddings
+log_memory("AFTER langchain_huggingface")
+
+log_memory("BEFORE langchain_mongodb")
 # pyrefly: ignore [missing-import]
 from langchain_mongodb import MongoDBAtlasVectorSearch
+log_memory("AFTER langchain_mongodb")
+
+log_memory("IMPORT END")
 
 # ---------------------------------------------------------
 # Constants
