@@ -16,12 +16,11 @@ print('Redis OK', flush=True)
 echo "[start.sh] Starting Celery..."
 
 python -m celery -A worker worker \
-    --loglevel=INFO \
+    --loglevel=DEBUG \
     --pool=solo \
     --concurrency=1 &
 
 CELERY_PID=$!
-
 echo "[start.sh] Celery PID=$CELERY_PID"
 
 sleep 10
@@ -30,6 +29,7 @@ if kill -0 "$CELERY_PID" 2>/dev/null; then
     echo "[start.sh] ✅ CELERY PROCESS IS ALIVE"
 else
     echo "[start.sh] ❌ CELERY PROCESS DIED"
+    exit 1
 fi
 
 exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}
