@@ -30,7 +30,7 @@ python -m celery -A worker worker \
     --loglevel=INFO \
     --pool=solo \
     --concurrency=1 \
-    > /tmp/celery.log 2>&1 &
+    2>&1 | tee /tmp/celery.log &
 
 CELERY_PID=$!
 
@@ -50,8 +50,40 @@ echo "[start.sh] ===== CELERY LOG ====="
 cat /tmp/celery.log
 echo "[start.sh] ====================="
 
-echo "[start.sh] Process memory:"
-ps -o pid,ppid,rss,vsz,comm,args
+echo "[start.sh] ===== PROCESS MEMORY ====="
+
+echo "[start.sh] Shell PID: $$"
+
+if [ -f "/proc/$$/status" ]; then
+    echo "[start.sh] Shell memory:"
+    grep -E "VmRSS|VmSize" /proc/$$/status || true
+fi
+
+if [ -n "$CELERY_PID" ] && [ -f "/proc/$CELERY_PID/status" ]; then
+    echo "[start.sh] Celery PID: $CELERY_PID"
+    echo "[start.sh] Celery memory:"
+    grep -E "VmRSS|VmSize" "/proc/$CELERY_PID/status" || true
+else
+    echo "[start.sh] Celery /proc entry not found"
+fi
+
+echo "[start.sh] Python/Celery processes:"
+for proc in /proc/[0-9]*; do
+    pid="${proc##*/}"
+
+    if [ -r "$proc/cmdline" ]; then
+        cmd=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)
+
+        case "$cmd" in
+            *python*|*celery*|*uvicorn*)
+                echo "PID=$pid CMD=$cmd"
+                grep -E "VmRSS|VmSize" "$proc/status" 2>/dev/null || true
+                ;;
+        esac
+    fi
+done
+
+echo "[start.sh] =========================="
 
 echo "[start.sh] Starting FastAPI..."
 

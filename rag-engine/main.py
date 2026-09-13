@@ -431,7 +431,32 @@ def _get_available_providers():
 # ---------------------------------------------------------
 @app.post("/api/ingest", status_code=202)
 def ingest(request: IngestRequest, current_user: str = Depends(get_current_user)):
+    def _log_process_memory(label):
+        try:
+            with open("/proc/self/status", "r") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        kb = int(line.split()[1])
+                        _log.info(
+                            f"INGEST_MEMORY | {label} | RSS={kb / 1024:.1f} MB"
+                        )
+                        return
+        except Exception as exc:
+            _log.warning(f"Could not read process memory: {exc}")
+
+    _log_process_memory("before celery import")
+    _log.info(
+        "INGEST_DEBUG | before celery import",
+        extra={"session_id": request.sessionId}
+    )
+
     from config import celery_app
+
+    _log.info(
+        "INGEST_DEBUG | celery import complete",
+        extra={"session_id": request.sessionId}
+    )
+    _log_process_memory("after celery import")
 
     _log.info("Ingest requested", extra={
         "session_id": request.sessionId,
@@ -440,10 +465,26 @@ def ingest(request: IngestRequest, current_user: str = Depends(get_current_user)
     })
 
     try:
+        _log.info(
+            "INGEST_DEBUG | before celery dispatch",
+            extra={"session_id": request.sessionId}
+        )
+        _log_process_memory("before celery dispatch")
+
         result = celery_app.send_task(
             "process-repo",
             kwargs={"payload": {"sessionId": request.sessionId, "repositoryUrl": request.repositoryUrl}}
         )
+
+        _log.info(
+            "INGEST_DEBUG | celery dispatch complete",
+            extra={
+                "session_id": request.sessionId,
+                "task_id": result.id
+            }
+        )
+        _log_process_memory("after celery dispatch")
+
         _log.info("Celery task dispatched", extra={
             "session_id": request.sessionId,
             "task_id": result.id,
@@ -461,6 +502,12 @@ def ingest(request: IngestRequest, current_user: str = Depends(get_current_user)
                 "sessionId": request.sessionId,
             }
         )
+
+    _log.info(
+        "INGEST_DEBUG | returning 202",
+        extra={"session_id": request.sessionId}
+    )
+    _log_process_memory("before returning 202")
 
     return JSONResponse(
         status_code=202,
