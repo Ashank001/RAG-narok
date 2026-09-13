@@ -30,11 +30,14 @@ python -m celery -A worker worker \
     --loglevel=INFO \
     --pool=solo \
     --concurrency=1 \
-    2>&1 | tee /tmp/celery.log &
+    > /tmp/celery.log 2>&1 &
 
 CELERY_PID=$!
 
 echo "[start.sh] Celery PID=$CELERY_PID"
+
+# Keep Celery logs visible in Render
+tail -f /tmp/celery.log &
 
 sleep 10
 
@@ -74,22 +77,16 @@ python -c "
 import os, ssl, redis
 try:
     r = redis.from_url(os.getenv('REDIS_URL'), ssl_cert_reqs=ssl.CERT_NONE)
-    keys = r.keys('*')
-    print(f'[start.sh] Total Redis keys: {len(keys)}')
-    for k in keys:
-        k_str = k.decode(\"utf-8\") if isinstance(k, bytes) else str(k)
-        t_bytes = r.type(k)
-        t = t_bytes.decode(\"utf-8\") if isinstance(t_bytes, bytes) else str(t_bytes)
+    print('[start.sh] Checking specific Celery queues (read-only)...')
+    for q in ['celery', 'ingestion-queue']:
+        t_bytes = r.type(q)
+        t = t_bytes.decode("utf-8") if isinstance(t_bytes, bytes) else str(t_bytes)
         if t == 'list':
-            print(f'  - {k_str} (list, len={r.llen(k)})')
-        elif t == 'hash':
-            print(f'  - {k_str} (hash, len={r.hlen(k)})')
-        elif t == 'set':
-            print(f'  - {k_str} (set, card={r.scard(k)})')
-        elif t == 'zset':
-            print(f'  - {k_str} (zset, card={r.zcard(k)})')
+            print(f'  - {q} (list, len={r.llen(q)})')
+        elif t != 'none':
+            print(f'  - {q} (type={t})')
         else:
-            print(f'  - {k_str} ({t})')
+            print(f'  - {q} (empty/not found)')
 except Exception as e:
     print(f'[start.sh] Redis diag error: {e}')
 "
