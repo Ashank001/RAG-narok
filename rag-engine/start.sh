@@ -46,6 +46,55 @@ else
     exit 1
 fi
 
+echo "[start.sh] ===== CELERY DIAGNOSTICS ====="
+if [ -d "/proc/$CELERY_PID" ]; then
+    echo "[start.sh] 1. Process Status:"
+    grep -E "^(Name|State|VmRSS|VmSize|Threads):" /proc/$CELERY_PID/status || true
+    echo "[start.sh] 2. Wchan:"
+    cat /proc/$CELERY_PID/wchan 2>/dev/null || echo "N/A"
+    echo ""
+    echo "[start.sh] 3. Cmdline:"
+    tr '\0' ' ' < /proc/$CELERY_PID/cmdline 2>/dev/null || echo "N/A"
+    echo ""
+    echo "[start.sh] 4. Open FDs:"
+    ls -1 /proc/$CELERY_PID/fd 2>/dev/null | wc -l || echo "N/A"
+else
+    echo "[start.sh] /proc/$CELERY_PID not found."
+fi
+
+echo "[start.sh] 5. Log File:"
+if [ -f "/tmp/celery.log" ]; then
+    ls -l /tmp/celery.log
+else
+    echo "/tmp/celery.log does not exist."
+fi
+
+echo "[start.sh] 6. Redis Queue Check:"
+python -c "
+import os, ssl, redis
+try:
+    r = redis.from_url(os.getenv('REDIS_URL'), ssl_cert_reqs=ssl.CERT_NONE)
+    keys = r.keys('*')
+    print(f'[start.sh] Total Redis keys: {len(keys)}')
+    for k in keys:
+        k_str = k.decode(\"utf-8\") if isinstance(k, bytes) else str(k)
+        t_bytes = r.type(k)
+        t = t_bytes.decode(\"utf-8\") if isinstance(t_bytes, bytes) else str(t_bytes)
+        if t == 'list':
+            print(f'  - {k_str} (list, len={r.llen(k)})')
+        elif t == 'hash':
+            print(f'  - {k_str} (hash, len={r.hlen(k)})')
+        elif t == 'set':
+            print(f'  - {k_str} (set, card={r.scard(k)})')
+        elif t == 'zset':
+            print(f'  - {k_str} (zset, card={r.zcard(k)})')
+        else:
+            print(f'  - {k_str} ({t})')
+except Exception as e:
+    print(f'[start.sh] Redis diag error: {e}')
+"
+echo "[start.sh] ================================"
+
 echo "[start.sh] ===== CELERY LOG ====="
 cat /tmp/celery.log
 echo "[start.sh] ====================="
