@@ -245,6 +245,12 @@ def _check_repo_size(repo_url: str, session_id: str) -> dict:
         with urllib.request.urlopen(req, timeout=GITHUB_API_TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as http_err:
+        log.error("GitHub API HTTPError", extra={
+            "status": http_err.code,
+            "url": req.full_url,
+            "has_token": bool(github_token),
+            "headers": dict(http_err.headers)
+        })
         if http_err.code == 404:
             raise ValueError(
                 f"Repository not found: github.com/{owner}/{repo}. "
@@ -351,6 +357,28 @@ def update_session_status(session_id: str, status: str, error_log: str | None = 
     try:
         db = get_sync_db()
         db_name = db.name
+        client = db.client
+        safe_uri = str(client.address)
+        log.info(f"update_session_status DB DIAGNOSTICS:", extra={
+            "session_id_queried": session_id,
+            "database_name": db_name,
+            "collection_name": "sessions",
+            "mongo_host": safe_uri,
+        })
+        
+        count = db.sessions.count_documents({"sessionId": session_id})
+        log.info(f"Session count for {session_id}: {count}")
+        if count == 0:
+            sample = db.sessions.find_one()
+            if sample:
+                log.info("No document found. Sample document keys from 'sessions' collection:", extra={
+                    "sample_keys": list(sample.keys()),
+                    "sample_sessionId": str(sample.get("sessionId", "<missing>")),
+                    "sample__id": str(sample.get("_id", "")),
+                })
+            else:
+                log.info("The 'sessions' collection is completely EMPTY.")
+
         log.info(f"update_session_status: using db='{db_name}', collection='sessions'", extra={
             "session_id": session_id, "db_name": db_name,
         })
@@ -442,7 +470,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
     Returns a summary dict with chunk and document counts.
     """
     log = get_logger(__name__, session_id=session_id)
-    log_memory("START", logger=log)
+    log_memory("ingest_repository START", logger=log)
     # Create a temporary directory using the OS temp path (works on Windows, Linux, macOS)
     repo_path = tempfile.mkdtemp(prefix=f"ragnarok_{session_id}_")
 
@@ -456,9 +484,12 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 0: Repo size guard — reject oversized repos
         # --------------------------------------------------
+        log_memory("BEFORE GitHub repository size check", logger=log)
         _check_repo_size(repo_url, session_id)
+        log_memory("AFTER GitHub repository size check", logger=log)
 
         try:
+            log_memory("BEFORE Git clone", logger=log)
             repo = git.Repo.clone_from(
                 url=repo_url,
                 to_path=repo_path,
@@ -472,6 +503,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             raise clone_err
 
         # Count all files before filtering (for diagnostics)
+        log_memory("BEFORE repository file discovery / os.walk", logger=log)
         all_files = []
         for root, dirs, files in os.walk(repo_path):
             # Skip .git directory during walk
@@ -481,21 +513,29 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
 
         log.info("Clone complete, %d files found", len(all_files),
                  extra={"total_files_in_repo": len(all_files)})
+        log_memory("AFTER repository file discovery / os.walk", logger=log)
 
         # --------------------------------------------------
         # Step 1b: Filter and load files
         # --------------------------------------------------
         update_session_status(session_id, "processing", message="Filtering files...")
 
+        log_memory("BEFORE GitLoader import", logger=log)
         # pyrefly: ignore [missing-import]
         from langchain_community.document_loaders import GitLoader
+        log_memory("AFTER GitLoader import", logger=log)
+        
+        log_memory("BEFORE GitLoader construction", logger=log)
         loader = GitLoader(
             repo_path=repo_path,
             branch=default_branch,
             file_filter=is_source_file,
         )
+        
+        log_memory("BEFORE GitLoader.load()", logger=log)
         docs = loader.load()
-        log_memory(f"AFTER LOAD DOCS ({len(docs)} raw docs)", logger=log)
+        approx_chars = sum(len(getattr(d, 'page_content', '')) for d in docs)
+        log_memory(f"AFTER GitLoader.load() ({len(docs)} docs, ~{approx_chars} chars)", logger=log)
 
         # Apply 1 MB file-size guard: drop documents whose source file is too large
         oversized_count = 0
@@ -528,14 +568,19 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         update_session_status(session_id, "processing",
                               message=f"Splitting {len(docs)} files into chunks...")
+        log_memory("BEFORE RecursiveCharacterTextSplitter import", logger=log)
         # pyrefly: ignore [missing-import]
         from langchain_text_splitters import RecursiveCharacterTextSplitter
+        log_memory("AFTER RecursiveCharacterTextSplitter import", logger=log)
+        log_memory("BEFORE splitter construction", logger=log)
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,
         )
+        log_memory("BEFORE split_documents()", logger=log)
         chunks = splitter.split_documents(docs)
-        log_memory(f"AFTER CHUNKING ({len(chunks)} chunks)", logger=log)
+        approx_chunk_chars = sum(len(getattr(c, 'page_content', '')) for c in chunks)
+        log_memory(f"AFTER split_documents() ({len(chunks)} chunks, ~{approx_chunk_chars} chars)", logger=log)
         log.info("Chunking complete, %d chunks created", len(chunks),
                  extra={"chunk_count": len(chunks)})
 
@@ -556,13 +601,17 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         update_session_status(session_id, "processing",
                               message=f"Embedding {len(chunks)} chunks...")
         log.info("Initializing embedding model", extra={"model": EMBEDDING_MODEL})
+        log_memory("BEFORE HuggingFaceEmbeddings import", logger=log)
+        from langchain_huggingface import HuggingFaceEmbeddings
+        log_memory("AFTER HuggingFaceEmbeddings import", logger=log)
+        log_memory("BEFORE HuggingFaceEmbeddings/model initialization", logger=log)
         embeddings = HuggingFaceEmbeddings(
             model_name=EMBEDDING_MODEL,
             # Run on CPU; set device="cuda" if you have a GPU
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True},
         )
-        log_memory("AFTER EMBEDDING MODEL", logger=log)
+        log_memory("AFTER HuggingFaceEmbeddings/model initialization", logger=log)
 
         # --------------------------------------------------
         # Step 4: Upload to MongoDB Atlas Vector Search
@@ -571,6 +620,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         log.info("Connecting to MongoDB Atlas", extra={"db": DB_NAME, "collection": COLLECTION_NAME})
         collection = get_sync_collection(DB_NAME, COLLECTION_NAME)
 
+        log_memory("BEFORE MongoDB vector store initialization", logger=log)
         vector_store = MongoDBAtlasVectorSearch(
             collection=collection,
             embedding=embeddings,
@@ -578,7 +628,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             text_key="text",
             embedding_key="embedding",
         )
-        log_memory("AFTER VECTOR STORE", logger=log)
+        log_memory("AFTER MongoDB vector store initialization", logger=log)
 
         # Batch upload to avoid overwhelming the embedding API
         total_uploaded = 0
@@ -587,7 +637,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             batch_num = (i // BATCH_SIZE) + 1
             total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
             log.info("Embedding and uploading batch", extra={"batch": batch_num, "total_batches": total_batches, "chunk_count": len(batch)})
-            log_memory(f"BEFORE BATCH {batch_num}/{total_batches}", logger=log)
+            log_memory(f"BEFORE vector-store batch insertion (Batch {batch_num}, {len(batch)} docs)", logger=log)
 
             max_batch_retries = 8
             backoff_delay = 5.0
@@ -595,7 +645,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 try:
                     vector_store.add_documents(batch)
                     total_uploaded += len(batch)
-                    log_memory(f"AFTER BATCH {batch_num}/{total_batches}", logger=log)
+                    log_memory(f"AFTER vector-store batch insertion (Batch {batch_num})", logger=log)
                     break
                 except Exception as exc:
                     # Daily quota is permanent until midnight — fail fast with a clear message.
@@ -631,12 +681,15 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         # Step 5: Clean up temporary clone directory
         # --------------------------------------------------
+        log_memory("BEFORE cleanup", logger=log)
         if os.path.exists(repo_path):
             try:
                 _rmtree_safe(repo_path)
                 log.debug("Temp directory cleaned up", extra={"temp_path": repo_path})
             except Exception as cleanup_err:
                 log.warning("Failed to clean up temp directory", extra={"temp_path": repo_path, "error": str(cleanup_err)})
+        log_memory("AFTER cleanup", logger=log)
+        log_memory("ingest_repository END", logger=log)
 
 
 # ---------------------------------------------------------
