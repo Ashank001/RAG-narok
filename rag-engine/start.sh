@@ -39,6 +39,34 @@ echo "[start.sh] Celery PID=$CELERY_PID"
 # Keep Celery logs visible in Render
 tail -f /tmp/celery.log &
 
+# Background 60-second polling diagnostic
+(
+    echo "[start.sh] [Diag-BG] Starting 60s Celery monitor for PID $CELERY_PID..."
+    for i in $(seq 1 60); do
+        if kill -0 "$CELERY_PID" 2>/dev/null; then
+            if [ $((i % 5)) -eq 0 ]; then
+                echo "[start.sh] [Diag-BG] ($i/60s) Celery PID: $CELERY_PID"
+                if [ -d "/proc/$CELERY_PID" ]; then
+                    grep -E "^(State|VmRSS|VmSize|Threads):" /proc/$CELERY_PID/status 2>/dev/null | tr '\n' ' '
+                    wchan=$(cat /proc/$CELERY_PID/wchan 2>/dev/null || echo "N/A")
+                    echo -n " Wchan: $wchan "
+                fi
+                if [ -f "/tmp/celery.log" ]; then
+                    size=$(wc -c < /tmp/celery.log)
+                    echo " LogSize: $size bytes"
+                else
+                    echo ""
+                fi
+            fi
+        else
+            echo "[start.sh] [Diag-BG] Celery process DIED unexpectedly at second $i!"
+            exit 1
+        fi
+        sleep 1
+    done
+    echo "[start.sh] [Diag-BG] 60s check complete. Celery is still ALIVE."
+) &
+
 sleep 10
 
 if kill -0 "$CELERY_PID" 2>/dev/null; then
@@ -73,7 +101,7 @@ else
 fi
 
 echo "[start.sh] 6. Redis Queue Check:"
-python -c "
+python -c - <<'EOF'
 import os, ssl, redis
 try:
     r = redis.from_url(os.getenv('REDIS_URL'), ssl_cert_reqs=ssl.CERT_NONE)
@@ -89,7 +117,7 @@ try:
             print(f'  - {q} (empty/not found)')
 except Exception as e:
     print(f'[start.sh] Redis diag error: {e}')
-"
+EOF
 echo "[start.sh] ================================"
 
 echo "[start.sh] ===== CELERY LOG ====="
