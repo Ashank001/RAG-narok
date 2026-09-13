@@ -56,11 +56,6 @@ from config import celery_app, get_sync_db, get_sync_collection
 log_memory("AFTER config imports")
 
 # LangChain Imports — AFTER load_dotenv() so thread limits are active
-log_memory("BEFORE langchain_text_splitters")
-# pyrefly: ignore [missing-import]
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-log_memory("AFTER langchain_text_splitters")
-
 log_memory("BEFORE langchain_huggingface")
 # pyrefly: ignore [missing-import]
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -533,6 +528,8 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         update_session_status(session_id, "processing",
                               message=f"Splitting {len(docs)} files into chunks...")
+        # pyrefly: ignore [missing-import]
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200,

@@ -101,7 +101,7 @@ else
 fi
 
 echo "[start.sh] 6. Redis Queue Check:"
-python -c - <<'EOF'
+python <<'EOF'
 import os, ssl, redis
 try:
     r = redis.from_url(os.getenv('REDIS_URL'), ssl_cert_reqs=ssl.CERT_NONE)
