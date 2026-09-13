@@ -32,6 +32,23 @@ from logger import get_logger
 # Module-level logger (no session bound at import time)
 _log = get_logger(__name__)
 
+
+def log_memory(label, logger=None):
+    """Log Linux RSS memory usage (reads /proc/self/status). Fail-safe."""
+    _l = logger or _log
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    mb = kb / 1024
+                    _l.info(
+                        f"MEMORY | {label} | RSS={mb:.1f} MB"
+                    )
+                    return
+    except Exception as e:
+        _l.warning(f"Could not read memory usage: {e}")
+
 # LangChain Imports — AFTER load_dotenv() so thread limits are active
 # pyrefly: ignore [missing-import]
 from langchain_community.document_loaders import GitLoader
@@ -416,6 +433,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
     Returns a summary dict with chunk and document counts.
     """
     log = get_logger(__name__, session_id=session_id)
+    log_memory("START", logger=log)
     # Create a temporary directory using the OS temp path (works on Windows, Linux, macOS)
     repo_path = tempfile.mkdtemp(prefix=f"ragnarok_{session_id}_")
 
@@ -439,6 +457,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             )
             default_branch = repo.active_branch.name
             log.info("Repository cloned", extra={"branch": default_branch, "depth": 1})
+            log_memory("AFTER CLONE", logger=log)
         except Exception as clone_err:
             log.error("Clone failed", extra={"error": str(clone_err)})
             raise clone_err
@@ -465,6 +484,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             file_filter=is_source_file,
         )
         docs = loader.load()
+        log_memory(f"AFTER LOAD DOCS ({len(docs)} raw docs)", logger=log)
 
         # Apply 1 MB file-size guard: drop documents whose source file is too large
         oversized_count = 0
@@ -478,6 +498,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                     continue
             filtered_docs.append(doc)
         docs = filtered_docs
+        log_memory(f"AFTER FILTER ({len(docs)} docs, {oversized_count} oversized skipped)", logger=log)
 
         log.info("After filtering, %d files remain", len(docs),
                  extra={
@@ -501,6 +522,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             chunk_overlap=200,
         )
         chunks = splitter.split_documents(docs)
+        log_memory(f"AFTER CHUNKING ({len(chunks)} chunks)", logger=log)
         log.info("Chunking complete, %d chunks created", len(chunks),
                  extra={"chunk_count": len(chunks)})
 
@@ -527,6 +549,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True},
         )
+        log_memory("AFTER EMBEDDING MODEL", logger=log)
 
         # --------------------------------------------------
         # Step 4: Upload to MongoDB Atlas Vector Search
@@ -542,6 +565,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             text_key="text",
             embedding_key="embedding",
         )
+        log_memory("AFTER VECTOR STORE", logger=log)
 
         # Batch upload to avoid overwhelming the embedding API
         total_uploaded = 0
@@ -550,6 +574,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             batch_num = (i // BATCH_SIZE) + 1
             total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
             log.info("Embedding and uploading batch", extra={"batch": batch_num, "total_batches": total_batches, "chunk_count": len(batch)})
+            log_memory(f"BEFORE BATCH {batch_num}/{total_batches}", logger=log)
 
             max_batch_retries = 8
             backoff_delay = 5.0
@@ -557,6 +582,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 try:
                     vector_store.add_documents(batch)
                     total_uploaded += len(batch)
+                    log_memory(f"AFTER BATCH {batch_num}/{total_batches}", logger=log)
                     break
                 except Exception as exc:
                     # Daily quota is permanent until midnight — fail fast with a clear message.

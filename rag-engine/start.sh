@@ -3,6 +3,7 @@
 export OPENBLAS_NUM_THREADS=1
 export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
+export MALLOC_TRIM_THRESHOLD_=100000
 
 echo "[start.sh] Redis check..."
 
@@ -20,7 +21,7 @@ print('[start.sh] Redis OK', flush=True)
 echo "[start.sh] Starting Celery..."
 
 python -u -m celery -A worker worker \
-    --loglevel=INFO \
+    --loglevel=DEBUG \
     --pool=solo \
     --concurrency=1 \
     --hostname=ragworker@%h &
@@ -28,7 +29,7 @@ python -u -m celery -A worker worker \
 CELERY_PID=$!
 echo "[start.sh] Celery PID=$CELERY_PID"
 
-sleep 20
+sleep 10
 
 if kill -0 "$CELERY_PID" 2>/dev/null; then
     echo "[start.sh] ✅ CELERY PROCESS IS ALIVE"
