@@ -56,11 +56,6 @@ from config import celery_app, get_sync_db, get_sync_collection
 log_memory("AFTER config imports")
 
 # LangChain Imports — AFTER load_dotenv() so thread limits are active
-log_memory("BEFORE langchain_community.document_loaders")
-# pyrefly: ignore [missing-import]
-from langchain_community.document_loaders import GitLoader
-log_memory("AFTER langchain_community.document_loaders")
-
 log_memory("BEFORE langchain_text_splitters")
 # pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -497,6 +492,8 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         update_session_status(session_id, "processing", message="Filtering files...")
 
+        # pyrefly: ignore [missing-import]
+        from langchain_community.document_loaders import GitLoader
         loader = GitLoader(
             repo_path=repo_path,
             branch=default_branch,
