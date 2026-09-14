@@ -520,22 +520,30 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         update_session_status(session_id, "processing", message="Filtering files...")
 
-        log_memory("BEFORE GitLoader import", logger=log)
-        # pyrefly: ignore [missing-import]
-        from langchain_community.document_loaders import GitLoader
-        log_memory("AFTER GitLoader import", logger=log)
-        
-        log_memory("BEFORE GitLoader construction", logger=log)
-        loader = GitLoader(
-            repo_path=repo_path,
-            branch=default_branch,
-            file_filter=is_source_file,
-        )
-        
-        log_memory("BEFORE GitLoader.load()", logger=log)
-        docs = loader.load()
+        log_memory("BEFORE manual document loading", logger=log)
+        from langchain_core.documents import Document
+        docs = []
+
+        for root, dirs, files in os.walk(repo_path):
+            # Skip .git directory during walk
+            dirs[:] = [d for d in dirs if d != ".git"]
+
+            for filename in files:
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, repo_path)
+
+                if not is_source_file(rel_path):
+                    continue
+
+                try:
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        text = f.read()
+                    docs.append(Document(page_content=text, metadata={"source": rel_path}))
+                except Exception as e:
+                    log.warning(f"Skipping {full_path}: {e}")
+
         approx_chars = sum(len(getattr(d, 'page_content', '')) for d in docs)
-        log_memory(f"AFTER GitLoader.load() ({len(docs)} docs, ~{approx_chars} chars)", logger=log)
+        log_memory(f"AFTER manual document loading ({len(docs)} docs, ~{approx_chars} chars)", logger=log)
 
         # Apply 1 MB file-size guard: drop documents whose source file is too large
         oversized_count = 0
