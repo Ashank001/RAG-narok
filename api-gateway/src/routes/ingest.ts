@@ -30,6 +30,12 @@ const ingestHandler: RequestHandler = async (req: Request, res: Response): Promi
     });
     await session.save();
 
+    // DIAGNOSTIC LOGS
+    const dbName = Session.db.name;
+    const host = Session.db.host;
+    const collectionName = Session.collection.collectionName;
+    console.log(`[DIAGNOSTIC] API-Gateway saved session ${sessionId} to host: ${host}, db: ${dbName}, collection: ${collectionName}`);
+
     // Push job to BullMQ queue 'ingestion-queue'
     await ingestionQueue.add('ingest-job', {
       sessionId,
