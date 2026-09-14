@@ -8,8 +8,8 @@ export const connectDB = async (): Promise<void> => {
   }
 
   try {
-    await mongoose.connect(mongoUri);
-    console.log('Successfully connected to MongoDB cluster');
+    const conn = await mongoose.connect(mongoUri, { dbName: 'api-gateway' });
+    console.log(`Successfully connected to MongoDB cluster [Host: ${conn.connection.host}, Database: ${conn.connection.name}]`);
   } catch (error) {
     console.error('Failed to connect to MongoDB cluster:', error);
     process.exit(1);
