@@ -634,18 +634,20 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         update_session_status(session_id, "processing",
                               message=f"Embedding {len(chunks)} chunks...")
-        log.info("Initializing embedding model", extra={"model": EMBEDDING_MODEL})
-        log_memory("BEFORE HuggingFaceEmbeddings import", logger=log)
-        from langchain_huggingface import HuggingFaceEmbeddings
-        log_memory("AFTER HuggingFaceEmbeddings import", logger=log)
-        log_memory("BEFORE HuggingFaceEmbeddings/model initialization", logger=log)
-        embeddings = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            # Run on CPU; set device="cuda" if you have a GPU
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is missing. Cannot initialize embedding model.")
+            
+        log.info("Initializing embedding model", extra={"model": "models/gemini-embedding-2"})
+        log_memory("BEFORE GoogleGenerativeAIEmbeddings import", logger=log)
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+        log_memory("AFTER GoogleGenerativeAIEmbeddings import", logger=log)
+        log_memory("BEFORE GoogleGenerativeAIEmbeddings/model initialization", logger=log)
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/gemini-embedding-2",
+            google_api_key=gemini_api_key
         )
-        log_memory("AFTER HuggingFaceEmbeddings/model initialization", logger=log)
+        log_memory("AFTER GoogleGenerativeAIEmbeddings/model initialization", logger=log)
 
         # --------------------------------------------------
         # Step 4: Upload to MongoDB Atlas Vector Search

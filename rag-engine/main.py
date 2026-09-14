@@ -226,13 +226,16 @@ def get_embeddings():
     """Lazy-load the HuggingFace embedding model on first use."""
     global _embeddings
     if _embeddings is None:
-        model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is missing. Cannot initialize embedding model.")
+            
+        model = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-2")
         # pyrefly: ignore [missing-import]
-        from langchain_huggingface import HuggingFaceEmbeddings
-        _embeddings = HuggingFaceEmbeddings(
-            model_name=model,
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+        _embeddings = GoogleGenerativeAIEmbeddings(
+            model=model,
+            google_api_key=gemini_api_key
         )
     return _embeddings
 
