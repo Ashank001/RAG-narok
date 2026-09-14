@@ -731,6 +731,8 @@ def process_repository(self, payload: dict | None = None, sessionId: str | None 
     # --- FIX 1 + FIX 4: Wrap entire body with comprehensive logging ---
     try:
         # Update session status to 'processing'
+        # Small delay to allow api-gateway to finish writing the session document
+        time.sleep(2)
         update_session_status(session_id, "processing", message="Cloning repository...")
         log.info("Task started", extra={
             "repo_url": repo_url,
