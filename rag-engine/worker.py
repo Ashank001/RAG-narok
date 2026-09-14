@@ -576,19 +576,45 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         update_session_status(session_id, "processing",
                               message=f"Splitting {len(docs)} files into chunks...")
-        log_memory("BEFORE RecursiveCharacterTextSplitter import", logger=log)
-        # pyrefly: ignore [missing-import]
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-        log_memory("AFTER RecursiveCharacterTextSplitter import", logger=log)
-        log_memory("BEFORE splitter construction", logger=log)
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-        )
-        log_memory("BEFORE split_documents()", logger=log)
-        chunks = splitter.split_documents(docs)
+        log_memory("BEFORE manual chunking", logger=log)
+        chunks = []
+        chunk_size = 1000
+        chunk_overlap = 200
+        
+        for doc in docs:
+            text = doc.page_content
+            meta = doc.metadata
+            
+            if not text:
+                continue
+                
+            start = 0
+            text_len = len(text)
+            
+            while start < text_len:
+                end = start + chunk_size
+                
+                # Heuristic: try to break at a newline or space near the end of the chunk
+                if end < text_len:
+                    break_point = text.rfind('\n', max(start, end - 100), end)
+                    if break_point != -1:
+                        end = break_point + 1
+                    else:
+                        break_point = text.rfind(' ', max(start, end - 100), end)
+                        if break_point != -1:
+                            end = break_point + 1
+                            
+                chunk_text = text[start:end]
+                # Use a shallow copy of metadata so we don't accidentally mutate across chunks
+                chunks.append(Document(page_content=chunk_text, metadata=meta.copy()))
+                
+                if end >= text_len:
+                    break
+                    
+                start = end - chunk_overlap
+
         approx_chunk_chars = sum(len(getattr(c, 'page_content', '')) for c in chunks)
-        log_memory(f"AFTER split_documents() ({len(chunks)} chunks, ~{approx_chunk_chars} chars)", logger=log)
+        log_memory(f"AFTER manual chunking ({len(chunks)} chunks, ~{approx_chunk_chars} chars)", logger=log)
         log.info("Chunking complete, %d chunks created", len(chunks),
                  extra={"chunk_count": len(chunks)})
 
