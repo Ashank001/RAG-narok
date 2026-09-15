@@ -313,7 +313,7 @@ if not GROQ_API_KEY:
     _log.warning("GROQ_API_KEY missing — Groq LLM provider disabled")
 
 llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
+    model="llama-3.1-70b-versatile",
     temperature=0.2,
     streaming=True,
     max_retries=3,
@@ -403,7 +403,7 @@ async def _stream_gemini(system_prompt: str, user_query: str):
     """
     client = genai.Client(api_key=GEMINI_API_KEY)
     response = await client.aio.models.generate_content_stream(
-        model="gemini-2.0-flash",
+        model="gemini-3.6-flash",
         contents=user_query,
         config=genai.types.GenerateContentConfig(
             system_instruction=system_prompt,
@@ -619,7 +619,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                         retrieved_docs = get_vector_store().similarity_search(
                             user_query,
                             k=RETRIEVAL_TOP_K,
-                            pre_filter={"session_id": {"$eq": session_id}},
+                            post_filter_pipeline=[{"$match": {"session_id": session_id}}],
                         )
                         break
                     except Exception as search_exc:
