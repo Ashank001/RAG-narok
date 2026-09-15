@@ -88,17 +88,18 @@ export default function DashboardPage() {
   // Check API on first chat attempt
   const checkApiOnce = useRef(false);
   const ensureApiCheck = useCallback(async () => {
-    if (checkApiOnce.current) return apiConnected;
-    checkApiOnce.current = true;
+    if (checkApiOnce.current && apiConnected) return true;
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // Increased timeout for Render cold start
       await apiFetch("/health", { method: "GET", signal: controller.signal });
       clearTimeout(timeoutId);
       setApiConnected(true);
+      checkApiOnce.current = true;
       return true;
     } catch {
       setApiConnected(false);
+      // Do not set checkApiOnce = true on failure, so it retries next time
       return false;
     }
   }, [apiConnected]);
