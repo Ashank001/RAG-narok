@@ -12,9 +12,9 @@
 import { getAuthToken } from "./auth";
 
 const BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_BACKEND_URL ?? "https://ragnarok-rag-api.onrender.com";
 const INGEST_BACKEND_URL =
-  process.env.NEXT_PUBLIC_INGEST_BACKEND_URL ?? "http://localhost:3001";
+  process.env.NEXT_PUBLIC_INGEST_BACKEND_URL ?? "https://ragnarok-api-gateway.onrender.com";
 
 // ---------------------------------------------------------------------------
 // Core fetch wrapper
