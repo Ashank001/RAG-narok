@@ -541,6 +541,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
     7. Stream response to client as SSE.
     8. After stream ends: save to Redis cache + save to conversation history.
     """
+    _log.info("[CHAT] request received", extra={"session_id": session_id})
     if not chat_request.query or not chat_request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
@@ -632,25 +633,28 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                         search_backoff = min(search_backoff * 2.0, 120.0)
 
                 if retrieved_docs:
+                    _log.info(f"[CHAT] vector retrieval complete: {len(retrieved_docs)} candidates", extra={"session_id": session_id})
                     # -----------------------------------------
-                    # STEP 4: Rerank with cross-encoder
+                    # STEP 4: Rerank with cross-encoder (DISABLED TO PREVENT OOM)
                     # -----------------------------------------
-                    _log.info("Reranking candidates", extra={
+                    _log.info("[CHAT] reranking skipped/completed", extra={
                         "session_id": session_id,
                         "candidates": len(retrieved_docs),
                         "rerank_top_k": RERANK_TOP_K,
                     })
-                    reranked_docs = rerank_documents(user_query, retrieved_docs, top_k=RERANK_TOP_K)
+                    
+                    # Use retrieved docs directly instead of reranking
+                    reranked_docs = retrieved_docs[:RERANK_TOP_K]
 
                     context_text = "\n\n---\n\n".join(
                         doc.page_content for doc in reranked_docs
                     )
-                    _log.info("Context retrieved and reranked", extra={
+                    _log.info("[CHAT] context built", extra={
                         "session_id": session_id,
-                        "candidates_retrieved": len(retrieved_docs),
-                        "chunks_after_rerank": len(reranked_docs),
+                        "chunks_used": len(reranked_docs),
                     })
                 else:
+                    _log.info("[CHAT] vector retrieval complete: 0 candidates", extra={"session_id": session_id})
                     _log.info("No matching documents for session", extra={"session_id": session_id})
             except Exception as retrieval_err:
                 err_detail = str(retrieval_err)
@@ -690,6 +694,8 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
             provider_used = None
             providers = _get_available_providers()
             last_error = None
+            
+            _log.info("[CHAT] calling Groq", extra={"session_id": session_id})
 
             for provider_name, stream_fn in providers:
                 try:
@@ -698,6 +704,9 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                     async for chunk in stream_fn(system_prompt, user_query):
                         full_response.append(chunk)
                         yield f"data: {json.dumps({'text': chunk})}\n\n"
+                        if not yielded_any:
+                            _log.info(f"[CHAT] {provider_name} stream started", extra={"session_id": session_id})
+                            _log.info("[CHAT] SSE token sent", extra={"session_id": session_id})
                         yielded_any = True
                     provider_used = provider_name
                     _log.info("LLM provider used", extra={"provider": provider_name, "session_id": session_id})
@@ -766,10 +775,13 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                 })
 
             # Send completion signal
+            _log.info("[CHAT] stream completed", extra={"session_id": session_id})
             yield f"data: {json.dumps({'done': True})}\n\n"
 
         except Exception as e:
-            _log.error("Streaming error", extra={"session_id": session_id, "error": str(e)})
+            import traceback
+            err_detail = traceback.format_exc()
+            _log.error("Streaming error", extra={"session_id": session_id, "error": err_detail})
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(
