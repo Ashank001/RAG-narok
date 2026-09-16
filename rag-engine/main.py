@@ -313,7 +313,7 @@ if not GROQ_API_KEY:
     _log.warning("GROQ_API_KEY missing — Groq LLM provider disabled")
 
 llm = ChatGroq(
-    model="llama-3.1-70b-versatile",
+    model="openai/gpt-oss-120b",
     temperature=0.2,
     streaming=True,
     max_retries=3,
@@ -705,10 +705,11 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                         full_response.append(chunk)
                         yield f"data: {json.dumps({'text': chunk})}\n\n"
                         if not yielded_any:
-                            _log.info(f"[CHAT] {provider_name} stream started", extra={"session_id": session_id})
+                            _log.info(f"[CHAT] {provider_name.capitalize()} stream started", extra={"session_id": session_id})
                             _log.info("[CHAT] SSE token sent", extra={"session_id": session_id})
                         yielded_any = True
                     provider_used = provider_name
+                    _log.info("[CHAT] stream completed", extra={"session_id": session_id})
                     _log.info("LLM provider used", extra={"provider": provider_name, "session_id": session_id})
                     break  # Success — exit the fallback loop
                 except Exception as provider_exc:
@@ -721,6 +722,10 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                             "error": str(provider_exc),
                         })
                         raise provider_exc
+                    
+                    if provider_name == "groq":
+                        _log.error(f"Groq provider error: {str(provider_exc)}", extra={"session_id": session_id})
+
                     # Log the appropriate level based on error type
                     if isinstance(provider_exc, GroqRateLimitError) or "429" in str(provider_exc):
                         _log.warning("LLM provider rate-limited, trying next", extra={
