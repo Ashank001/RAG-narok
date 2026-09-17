@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────
+# keep-alive.yml
+# ─────────────────────────────────────────────────────────────────────
+# Pings the Render free-tier services every 14 minutes to prevent them
+# from spinning down after ~15 min of inactivity.
+#
+# What this does:
+#   - Hits GET /health on the API Gateway and RAG Engine
+#   - These are lightweight JSON endpoints (no DB writes, no LLM calls)
+#   - Keeps the services "warm" so user requests don't hit cold starts
+#
+# What this does NOT guarantee:
+#   - Zero cold starts — GitHub Actions cron can drift ±15 min, and
+#     Render may still spin down during gaps. This dramatically reduces
+#     the probability but doesn't eliminate it entirely.
+#
+# To disable: comment out the 'schedule' trigger or delete this file.
+# ─────────────────────────────────────────────────────────────────────
+
+name: Keep Alive — Render Services
+
+on:
+  schedule:
+    # Every 14 minutes — Render free tier spins down after ~15 min idle
+    - cron: '*/14 * * * *'
+  workflow_dispatch: # Allow manual trigger for testing
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    name: Ping Render Services
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping API Gateway
+        run: |
+          echo "Pinging API Gateway..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            "https://ragnarok-api-gateway.onrender.com/health" || echo "000")
+          echo "API Gateway responded: $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ API Gateway is warm"
+          else
+            echo "⚠️ API Gateway returned $STATUS (may be cold-starting)"
+          fi
+
+      - name: Ping RAG Engine
+        run: |
+          echo "Pinging RAG Engine..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            "https://ragnarok-rag-api.onrender.com/health" || echo "000")
+          echo "RAG Engine responded: $STATUS"
+          if [ "$STATUS" = "200" ]; then
+            echo "✅ RAG Engine is warm"
+          else
+            echo "⚠️ RAG Engine returned $STATUS (may be cold-starting)"
+          fi

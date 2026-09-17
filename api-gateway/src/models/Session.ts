@@ -2,6 +2,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ISession extends Document {
   sessionId: string;
+  githubUsername?: string;
   repositoryUrl: string;
   status: 'queued' | 'processing' | 'completed' | 'failed';
   errorLog?: string;
@@ -15,6 +16,12 @@ const SessionSchema: Schema = new Schema<ISession>({
     required: true, 
     unique: true, 
     index: true 
+  },
+  githubUsername: {
+    type: String,
+    index: true,
+    // Not `required` at the Mongoose level so legacy sessions without
+    // this field remain valid. New sessions always set it.
   },
   repositoryUrl: { 
     type: String, 
