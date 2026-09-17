@@ -77,7 +77,9 @@ ATLAS_INDEX_NAME = "vector_index"
 # bge-small: 130 MB, 384 dims — fits in Render 512 MB free tier alongside FastAPI+Celery.
 # bge-base (438 MB, 768 dims) causes OOM on free tier; use bge-base only on paid plans.
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"  # 130 MB, 384 dims, no API key needed
-BATCH_SIZE = 32  # Smaller batches to keep peak RAM usage low on 512 MB containers
+BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "15"))
+EMBEDDING_MIN_INTERVAL = float(os.getenv("EMBEDDING_MIN_INTERVAL", "0.0"))
+EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "8"))
 
 # Repo size guard thresholds (configurable via env)
 MAX_REPO_SIZE_KB = int(os.getenv("MAX_REPO_SIZE_KB", "51200"))  # 50 MB
@@ -576,45 +578,25 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         # --------------------------------------------------
         update_session_status(session_id, "processing",
                               message=f"Splitting {len(docs)} files into chunks...")
-        log_memory("BEFORE manual chunking", logger=log)
-        chunks = []
-        chunk_size = 1000
-        chunk_overlap = 200
+        log_memory("BEFORE RecursiveCharacterTextSplitter chunking", logger=log)
         
-        for doc in docs:
-            text = doc.page_content
-            meta = doc.metadata
-            
-            if not text:
-                continue
-                
-            start = 0
-            text_len = len(text)
-            
-            while start < text_len:
-                end = start + chunk_size
-                
-                # Heuristic: try to break at a newline or space near the end of the chunk
-                if end < text_len:
-                    break_point = text.rfind('\n', max(start, end - 100), end)
-                    if break_point != -1:
-                        end = break_point + 1
-                    else:
-                        break_point = text.rfind(' ', max(start, end - 100), end)
-                        if break_point != -1:
-                            end = break_point + 1
-                            
-                chunk_text = text[start:end]
-                # Use a shallow copy of metadata so we don't accidentally mutate across chunks
-                chunks.append(Document(page_content=chunk_text, metadata=meta.copy()))
-                
-                if end >= text_len:
-                    break
-                    
-                start = end - chunk_overlap
+        # Use LangChain's RecursiveCharacterTextSplitter for semantic code boundaries
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        
+        chunk_size = 6000
+        chunk_overlap = 600
+        
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            # Recursive splitters try these separators in order to keep semantic blocks together
+            separators=["\n\n", "\n", " ", ""]
+        )
+        
+        chunks = text_splitter.split_documents(docs)
 
         approx_chunk_chars = sum(len(getattr(c, 'page_content', '')) for c in chunks)
-        log_memory(f"AFTER manual chunking ({len(chunks)} chunks, ~{approx_chunk_chars} chars)", logger=log)
+        log_memory(f"AFTER RecursiveCharacterTextSplitter chunking ({len(chunks)} chunks, ~{approx_chunk_chars} chars)", logger=log)
         log.info("Chunking complete, %d chunks created", len(chunks),
                  extra={"chunk_count": len(chunks)})
 
@@ -675,7 +657,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             log.info("Embedding and uploading batch", extra={"batch": batch_num, "total_batches": total_batches, "chunk_count": len(batch)})
             log_memory(f"BEFORE vector-store batch insertion (Batch {batch_num}, {len(batch)} docs)", logger=log)
 
-            max_batch_retries = 8
+            max_batch_retries = EMBEDDING_MAX_RETRIES
             backoff_delay = 5.0
             for attempt in range(1, max_batch_retries + 1):
                 try:
@@ -701,7 +683,10 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                     time.sleep(wait)
                     backoff_delay = min(backoff_delay * 2.0, 120.0)
 
-            # No sleep needed — local model has no API rate limits
+            # Proactive rate limiting: sleep between batches to avoid immediately hitting RPM limits
+            if EMBEDDING_MIN_INTERVAL > 0 and batch_num < total_batches:
+                log.debug(f"Pacing requests: sleeping {EMBEDDING_MIN_INTERVAL}s before next batch")
+                time.sleep(EMBEDDING_MIN_INTERVAL)
 
         log.info("Embedding complete")
         log.info("Stored %d vectors in MongoDB", total_uploaded,
