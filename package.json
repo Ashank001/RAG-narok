@@ -2,6 +2,11 @@
   "dependencies": {
     "@types/react-syntax-highlighter": "^15.5.13",
     "framer-motion": "^12.43.0",
-    "react-syntax-highlighter": "^16.1.1"
+    "jsonwebtoken": "^9.0.3",
+    "react-syntax-highlighter": "^16.1.1",
+    "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10"
   }
 }
