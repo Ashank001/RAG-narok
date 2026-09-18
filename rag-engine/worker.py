@@ -7,6 +7,7 @@ import sys
 import time
 import json
 import traceback
+import hashlib
 import urllib.request
 import urllib.error
 
@@ -606,96 +607,138 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 "Files may be empty or contain only whitespace."
             )
 
-        # Enrich each chunk's metadata with the session ID for traceability
+        update_session_status(session_id, "processing", message="Deduplicating chunks...")
+        log.info("Connecting to MongoDB Atlas", extra={"db": DB_NAME, "collection": COLLECTION_NAME})
+        collection = get_sync_collection(DB_NAME, COLLECTION_NAME)
+
+        # Retrieve existing chunk hashes for this specific session_id AND repo_url
+        existing_docs = list(collection.find(
+            {"session_id": session_id, "repo_url": repo_url},
+            {"chunk_hash": 1, "_id": 1}
+        ))
+        existing_hashes = {doc["chunk_hash"] for doc in existing_docs if "chunk_hash" in doc}
+        
+        # Enrich chunk metadata and compute deterministic chunk hash
+        current_hashes = set()
+        chunks_to_add = []
         for chunk in chunks:
             chunk.metadata["session_id"] = session_id
             chunk.metadata["repo_url"] = repo_url
+            
+            # Hash chunk content + source to identify unchanged code
+            content = chunk.page_content.encode("utf-8")
+            source = str(chunk.metadata.get("source", "")).encode("utf-8")
+            chunk_hash = hashlib.sha256(content + b"\\0" + source).hexdigest()
+            
+            chunk.metadata["chunk_hash"] = chunk_hash
+            current_hashes.add(chunk_hash)
+            
+            if chunk_hash not in existing_hashes:
+                chunks_to_add.append(chunk)
+
+        chunks_to_delete = existing_hashes - current_hashes
+        
+        log.info("Deduplication analysis complete", extra={
+            "total_chunks": len(chunks),
+            "unchanged_reused": len(chunks) - len(chunks_to_add),
+            "new_to_add": len(chunks_to_add),
+            "stale_to_delete": len(chunks_to_delete)
+        })
+
+        if chunks_to_delete:
+            delete_result = collection.delete_many({
+                "session_id": session_id,
+                "repo_url": repo_url,
+                "chunk_hash": {"$in": list(chunks_to_delete)}
+            })
+            log.info("Deleted stale chunks", extra={"deleted_count": delete_result.deleted_count})
 
         # --------------------------------------------------
         # Step 3: Initialize embedding model
         # --------------------------------------------------
         update_session_status(session_id, "processing",
-                              message=f"Embedding {len(chunks)} chunks...")
-        gemini_api_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_api_key:
-            raise ValueError("GEMINI_API_KEY environment variable is missing. Cannot initialize embedding model.")
-            
-        log.info("Initializing embedding model", extra={"model": "models/gemini-embedding-2"})
-        log_memory("BEFORE GoogleGenerativeAIEmbeddings import", logger=log)
-        from langchain_google_genai import GoogleGenerativeAIEmbeddings
-        log_memory("AFTER GoogleGenerativeAIEmbeddings import", logger=log)
-        log_memory("BEFORE GoogleGenerativeAIEmbeddings/model initialization", logger=log)
-        embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-2",
-            google_api_key=gemini_api_key
-        )
-        log_memory("AFTER GoogleGenerativeAIEmbeddings/model initialization", logger=log)
-
-        # --------------------------------------------------
-        # Step 4: Upload to MongoDB Atlas Vector Search
-        # --------------------------------------------------
-        update_session_status(session_id, "processing", message="Storing vectors...")
-        log.info("Connecting to MongoDB Atlas", extra={"db": DB_NAME, "collection": COLLECTION_NAME})
-        collection = get_sync_collection(DB_NAME, COLLECTION_NAME)
-
-        log_memory("BEFORE MongoDB vector store initialization", logger=log)
-        vector_store = MongoDBAtlasVectorSearch(
-            collection=collection,
-            embedding=embeddings,
-            index_name=ATLAS_INDEX_NAME,
-            text_key="text",
-            embedding_key="embedding",
-        )
-        log_memory("AFTER MongoDB vector store initialization", logger=log)
-
-        # Batch upload to avoid overwhelming the embedding API
+                              message=f"Embedding {len(chunks_to_add)} new chunks...")
+        
         total_uploaded = 0
-        for i in range(0, len(chunks), BATCH_SIZE):
-            batch = chunks[i : i + BATCH_SIZE]
-            batch_num = (i // BATCH_SIZE) + 1
-            total_batches = (len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE
-            log.info("Embedding and uploading batch", extra={"batch": batch_num, "total_batches": total_batches, "chunk_count": len(batch)})
-            log_memory(f"BEFORE vector-store batch insertion (Batch {batch_num}, {len(batch)} docs)", logger=log)
+        if chunks_to_add:
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_api_key:
+                raise ValueError("GEMINI_API_KEY environment variable is missing. Cannot initialize embedding model.")
+                
+            log.info("Initializing embedding model", extra={"model": "models/gemini-embedding-2"})
+            log_memory("BEFORE GoogleGenerativeAIEmbeddings import", logger=log)
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            log_memory("AFTER GoogleGenerativeAIEmbeddings import", logger=log)
+            log_memory("BEFORE GoogleGenerativeAIEmbeddings/model initialization", logger=log)
+            embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/gemini-embedding-2",
+                google_api_key=gemini_api_key
+            )
+            log_memory("AFTER GoogleGenerativeAIEmbeddings/model initialization", logger=log)
 
-            max_batch_retries = EMBEDDING_MAX_RETRIES
-            backoff_delay = 5.0
-            for attempt in range(1, max_batch_retries + 1):
-                try:
-                    vector_store.add_documents(batch)
-                    total_uploaded += len(batch)
-                    log_memory(f"AFTER vector-store batch insertion (Batch {batch_num})", logger=log)
-                    break
-                except Exception as exc:
-                    # Daily quota is permanent until midnight — fail fast with a clear message.
-                    if _is_daily_quota_exhausted(exc):
-                        msg = (
-                            f"Daily embedding quota exhausted on batch {batch_num}. "
-                            "Switch to a new GOOGLE_API_KEY or wait until the quota resets at midnight Pacific."
-                        )
-                        log.error(msg, extra={"batch": batch_num})
-                        raise RuntimeError(msg) from exc
-                    if attempt == max_batch_retries:
-                        log.error("Batch upload failed — max retries exhausted", extra={"batch": batch_num, "attempts": max_batch_retries, "error": str(exc)})
-                        raise exc
-                    # Per-minute rate limit — honour the server-suggested retryDelay.
-                    wait = _parse_retry_delay_secs(exc, default=backoff_delay)
-                    log.warning("Batch rate limited, retrying", extra={"batch": batch_num, "attempt": attempt, "max_retries": max_batch_retries, "retry_in_secs": round(wait, 1)})
-                    time.sleep(wait)
-                    backoff_delay = min(backoff_delay * 2.0, 120.0)
+            # --------------------------------------------------
+            # Step 4: Upload to MongoDB Atlas Vector Search
+            # --------------------------------------------------
+            update_session_status(session_id, "processing", message="Storing vectors...")
 
-            # Proactive rate limiting: sleep between batches to avoid immediately hitting RPM limits
-            if EMBEDDING_MIN_INTERVAL > 0 and batch_num < total_batches:
-                log.debug(f"Pacing requests: sleeping {EMBEDDING_MIN_INTERVAL}s before next batch")
-                time.sleep(EMBEDDING_MIN_INTERVAL)
+            log_memory("BEFORE MongoDB vector store initialization", logger=log)
+            vector_store = MongoDBAtlasVectorSearch(
+                collection=collection,
+                embedding=embeddings,
+                index_name=ATLAS_INDEX_NAME,
+                text_key="text",
+                embedding_key="embedding",
+            )
+            log_memory("AFTER MongoDB vector store initialization", logger=log)
 
-        log.info("Embedding complete")
-        log.info("Stored %d vectors in MongoDB", total_uploaded,
-                 extra={"vectors_uploaded": total_uploaded})
+            # Batch upload to avoid overwhelming the embedding API
+            for i in range(0, len(chunks_to_add), BATCH_SIZE):
+                batch = chunks_to_add[i : i + BATCH_SIZE]
+                batch_num = (i // BATCH_SIZE) + 1
+                total_batches = (len(chunks_to_add) + BATCH_SIZE - 1) // BATCH_SIZE
+                log.info("Embedding and uploading batch", extra={"batch": batch_num, "total_batches": total_batches, "chunk_count": len(batch)})
+                log_memory(f"BEFORE vector-store batch insertion (Batch {batch_num}, {len(batch)} docs)", logger=log)
+
+                max_batch_retries = EMBEDDING_MAX_RETRIES
+                backoff_delay = 5.0
+                for attempt in range(1, max_batch_retries + 1):
+                    try:
+                        vector_store.add_documents(batch)
+                        total_uploaded += len(batch)
+                        log_memory(f"AFTER vector-store batch insertion (Batch {batch_num})", logger=log)
+                        break
+                    except Exception as exc:
+                        # Daily quota is permanent until midnight — fail fast with a clear message.
+                        if _is_daily_quota_exhausted(exc):
+                            msg = (
+                                f"Daily embedding quota exhausted on batch {batch_num}. "
+                                "Switch to a new GOOGLE_API_KEY or wait until the quota resets at midnight Pacific."
+                            )
+                            log.error(msg, extra={"batch": batch_num})
+                            raise RuntimeError(msg) from exc
+                        if attempt == max_batch_retries:
+                            log.error("Batch upload failed — max retries exhausted", extra={"batch": batch_num, "attempts": max_batch_retries, "error": str(exc)})
+                            raise exc
+                        # Per-minute rate limit — honour the server-suggested retryDelay.
+                        wait = _parse_retry_delay_secs(exc, default=backoff_delay)
+                        log.warning("Batch rate limited, retrying", extra={"batch": batch_num, "attempt": attempt, "max_retries": max_batch_retries, "retry_in_secs": round(wait, 1)})
+                        time.sleep(wait)
+                        backoff_delay = min(backoff_delay * 2.0, 120.0)
+
+                # Proactive rate limiting: sleep between batches to avoid immediately hitting RPM limits
+                if EMBEDDING_MIN_INTERVAL > 0 and batch_num < total_batches:
+                    log.debug(f"Pacing requests: sleeping {EMBEDDING_MIN_INTERVAL}s before next batch")
+                    time.sleep(EMBEDDING_MIN_INTERVAL)
+
+            log.info("Embedding complete")
+            log.info("Stored %d new vectors in MongoDB", total_uploaded,
+                     extra={"vectors_uploaded": total_uploaded})
 
         return {
             "files_loaded": len(docs),
             "chunks_created": len(chunks),
             "vectors_uploaded": total_uploaded,
+            "stale_deleted": len(chunks_to_delete)
         }
 
     finally:
