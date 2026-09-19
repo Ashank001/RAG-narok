@@ -852,6 +852,66 @@ async def github_login(payload: dict):
         github_username = user_profile.get("login") # This will fetch "ashank"
 
     # Step 3: Issue our own application JWT token rooted in their GitHub identity
-    app_jwt = create_access_token(data={"sub": github_username})
+    # We securely embed the GitHub access token inside our signed JWT so we can use it later
+    # for the Autonomous Agent (creating branches, PRs, etc.)
+    app_jwt = create_access_token(data={
+        "sub": github_username,
+        "github_token": access_token
+    })
     
     return {"access_token": app_jwt, "token_type": "bearer", "username": github_username}
+
+from pydantic import BaseModel
+class AgentTaskRequest(BaseModel):
+    task: str
+
+@app.post("/agent/{session_id}")
+async def agent_endpoint(
+    session_id: str,
+    request: AgentTaskRequest,
+    req: Request,
+    current_user: str = Depends(get_current_user)
+):
+    """Starts the autonomous coding agent for the given session."""
+    from auth import get_github_token
+    from agent import CodingAgent
+    from fastapi.responses import StreamingResponse
+    import json
+    
+    # Extract the user's GitHub token from the JWT
+    auth_header = req.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = auth_header.split(" ")[1]
+    github_token = get_github_token(req, token)
+    
+    # Validate session ownership and status
+    db = mongo_client.get_database("api-gateway")
+    session = db.sessions.find_one({"sessionId": session_id})
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    if session.get("githubUsername") and session["githubUsername"] != current_user:
+        raise HTTPException(status_code=403, detail="Not authorized to access this session")
+        
+    if session.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Repository ingestion must be completed before running the agent")
+        
+    repo_url = session["repositoryUrl"]
+    
+    agent = CodingAgent(
+        task=request.task,
+        repo_url=repo_url,
+        session_id=session_id,
+        github_token=github_token
+    )
+    
+    async def event_generator():
+        try:
+            async for event in agent.execute():
+                yield event
+        except Exception as e:
+            yield f"data: {json.dumps({'stage': 'ERROR', 'message': str(e)})}\\n\\n"
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

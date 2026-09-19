@@ -3,6 +3,7 @@
 import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import IngestPanel from "./IngestPanel";
+import AgentPanel from "./AgentPanel";
 import { getUsername, getAvatarUrl, clearAuthToken } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 
@@ -145,6 +146,9 @@ export default function Sidebar({
 
         {/* Ingest Panel */}
         <IngestPanel onSessionReady={onSessionReady} onError={onError} />
+
+        {/* Agent Panel */}
+        <AgentPanel activeSession={activeSession} onError={onError} />
 
         {/* Chat History */}
         <div className="flex-1 overflow-y-auto px-3 py-4 space-y-1">

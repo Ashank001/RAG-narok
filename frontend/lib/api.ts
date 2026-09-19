@@ -201,3 +201,28 @@ export async function getSessionInfo(
   const response = await apiFetch(`/api/session/${sessionId}`);
   return response.json();
 }
+
+// ---------------------------------------------------------------------------
+// Typed helpers — Autonomous Agent
+// ---------------------------------------------------------------------------
+
+export interface AgentTaskBody {
+  task: string;
+}
+
+/**
+ * POST /agent/{sessionId}
+ * Returns the raw Response so the caller can stream SSE progress events.
+ */
+export async function postAgentTask(
+  sessionId: string,
+  body: AgentTaskBody,
+  signal?: AbortSignal
+): Promise<Response> {
+  return apiFetch(`/agent/${sessionId}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    signal,
+    rawResponse: true,
+  });
+}

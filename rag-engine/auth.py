@@ -69,3 +69,21 @@ def get_current_user(request: Request, token: Optional[str] = Depends(oauth2_sch
         return username
     except JWTError:
         raise credentials_exception
+
+def get_github_token(request: Request, token: Optional[str] = Depends(oauth2_scheme)):
+    """Extracts the GitHub access token securely stored within the application JWT."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if token is None:
+        raise credentials_exception
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        github_token = payload.get("github_token")
+        if github_token is None:
+            raise credentials_exception
+        return github_token
+    except JWTError:
+        raise credentials_exception

@@ -123,7 +123,7 @@ export function buildGitHubOAuthUrl(): string {
   // trailing slash difference) triggers the "redirect_uri not associated" error.
   const params = new URLSearchParams({
     client_id: clientId,
-    scope: "read:user user:email",
+    scope: "read:user user:email repo",
   });
 
   return `https://github.com/login/oauth/authorize?${params.toString()}`;
