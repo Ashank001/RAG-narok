@@ -628,6 +628,8 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 for doc in docs:
                     chunks = self.split_text(getattr(doc, 'page_content', ''), self.separators)
                     for chunk in chunks:
+                        if not chunk.strip():
+                            continue
                         new_doc = copy.deepcopy(doc)
                         new_doc.page_content = chunk
                         new_docs.append(new_doc)
@@ -760,6 +762,17 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                         total_uploaded += len(batch)
                         break
                     except Exception as exc:
+                        exc_str = str(exc)
+                        
+                        # Catch 400 errors and fail fast, logging the exact issue.
+                        if "400" in exc_str:
+                            log.error("Gemini HTTP 400 Bad Request", extra={
+                                "batch": batch_num,
+                                "error": exc_str,
+                                "type": str(type(exc))
+                            })
+                            raise RuntimeError(f"Gemini API returned 400 Bad Request: {exc_str}") from exc
+
                         # Daily quota is permanent until midnight — fail fast with a clear message.
                         if _is_daily_quota_exhausted(exc):
                             msg = (
@@ -769,7 +782,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                             log.error(msg, extra={"batch": batch_num})
                             raise RuntimeError(msg) from exc
                         if attempt == max_batch_retries:
-                            log.error("Batch upload failed — max retries exhausted", extra={"batch": batch_num, "attempts": max_batch_retries, "error": str(exc)})
+                            log.error("Batch upload failed — max retries exhausted", extra={"batch": batch_num, "attempts": max_batch_retries, "error": exc_str})
                             raise exc
                         # Per-minute rate limit — honour the server-suggested retryDelay.
                         wait = _parse_retry_delay_secs(exc, default=backoff_delay)
