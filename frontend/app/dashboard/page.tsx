@@ -12,7 +12,7 @@ import Sidebar from "@/components/Sidebar";
 import ChatWindow, { type Message, type IngestStep } from "@/components/ChatWindow";
 import Toast, { useToast } from "@/components/Toast";
 import { getUsername } from "@/lib/auth";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, getIngestStatus } from "@/lib/api";
 
 interface ChatSession {
   id: string;
@@ -29,6 +29,7 @@ export default function DashboardPage() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [activeRepoUrl, setActiveRepoUrl] = useState<string | null>(null);
+  const [activeSessionStatus, setActiveSessionStatus] = useState<string | null>(null);
 
   // Load sessions from localStorage on mount
   useEffect(() => {
@@ -42,6 +43,7 @@ export default function DashboardPage() {
         setActiveSession(active);
         const savedUrl = localStorage.getItem("ragnarok_active_repo");
         if (savedUrl) setActiveRepoUrl(savedUrl);
+        getIngestStatus(active).then(data => setActiveSessionStatus(data.status)).catch(() => {});
       }
     } catch (e) {
       console.error("Failed to load sessions from localStorage", e);
@@ -116,13 +118,14 @@ export default function DashboardPage() {
     setInput("");
     setActiveSession(null);
     setActiveRepoUrl(null);
+    setActiveSessionStatus(null);
     setIngestStep(null);
     setIngestRepoUrl(null);
     setIsStreaming(false);
     setIsSidebarOpen(false);
   };
 
-  const handleSelectSession = (id: string) => {
+  const handleSelectSession = async (id: string) => {
     const session = sessions.find((s) => s.id === id);
     if (session) {
       if (abortControllerRef.current) {
@@ -130,18 +133,27 @@ export default function DashboardPage() {
       }
       setActiveSession(session.id);
       setActiveRepoUrl(session.repoUrl || null);
+      setActiveSessionStatus("checking...");
       setMessages([]);
       setInput("");
       setIsStreaming(false);
       setIngestStep(null);
       setIngestRepoUrl(null);
       setIsSidebarOpen(false);
+      
+      try {
+        const data = await getIngestStatus(session.id);
+        setActiveSessionStatus(data.status);
+      } catch (e) {
+        setActiveSessionStatus("error");
+      }
     }
   };
 
   const handleSessionReady = (sessionId: string, repoUrl: string) => {
     setActiveSession(sessionId);
     setActiveRepoUrl(repoUrl);
+    setActiveSessionStatus("completed");
     setIngestStep(null);
     setIngestRepoUrl(null);
     setMessages([]);
@@ -456,6 +468,7 @@ export default function DashboardPage() {
         username={username}
         activeSession={activeSession}
         activeRepoUrl={activeRepoUrl}
+        activeSessionStatus={activeSessionStatus}
         ingestStep={ingestStep}
         ingestRepoUrl={ingestRepoUrl}
         onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}

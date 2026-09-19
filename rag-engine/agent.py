@@ -37,17 +37,25 @@ class CodingAgent:
         payload = {"stage": stage, "message": message}
         if data:
             payload.update(data)
+        _log.info(f"[AGENT] {stage}: {message}")
         return f"data: {json.dumps(payload)}\n\n"
 
     def _run_cmd(self, cmd: list, cwd: str = None) -> tuple[int, str]:
         """Runs a shell command safely in the workspace and returns (returncode, output)."""
         if not cwd:
             cwd = self.workspace
+            
+        # Prevent git from prompting for credentials in the terminal
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_ASKPASS"] = "echo"
+        
         try:
-            _log.info(f"Running command: {' '.join(cmd)}")
+            _log.info(f"[AGENT] Running command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 cwd=cwd,
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=60
@@ -61,12 +69,18 @@ class CodingAgent:
 
     def _clone_repo(self):
         """Clones the repository using the user's GitHub token."""
+        _log.info(f"[AGENT] Cloning repository {self.repo_url}")
         auth_url = self.repo_url.replace("https://", f"https://oauth2:{self.github_token}@")
-        self._run_cmd(["git", "clone", auth_url, "."])
+        code, out = self._run_cmd(["git", "clone", auth_url, "."])
+        if code != 0:
+            raise RuntimeError(f"Failed to clone repository: {out}")
+            
         self._run_cmd(["git", "config", "user.name", "RAGnarok Autonomous Agent"])
         self._run_cmd(["git", "config", "user.email", "agent@ragnarok.local"])
         branch_name = f"ragnarok-feature-{self.session_id[:8]}"
-        self._run_cmd(["git", "checkout", "-b", branch_name])
+        code, out = self._run_cmd(["git", "checkout", "-b", branch_name])
+        if code != 0:
+            raise RuntimeError(f"Failed to create branch: {out}")
         return branch_name
 
     def _get_code_context(self):
@@ -193,34 +207,40 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
         }
         
         # Some repos use 'master', let's fetch default branch first
-        repo_info_resp = httpx.get(f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}", headers=headers)
+        repo_info_resp = httpx.get(f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}", headers=headers, timeout=30.0)
         if repo_info_resp.status_code == 200:
             payload["base"] = repo_info_resp.json().get("default_branch", "main")
 
-        resp = httpx.post(url, headers=headers, json=payload)
+        resp = httpx.post(url, headers=headers, json=payload, timeout=30.0)
         resp.raise_for_status()
         return resp.json().get("html_url")
 
     async def execute(self):
         """Main execution workflow, yields SSE events."""
+        _log.info(f"[AGENT] Task execution started for session {self.session_id}")
         try:
             yield self._yield_event("CODE_RETRIEVAL", "Analyzing task and retrieving code context...")
             context = self._get_code_context()
+            _log.info("[AGENT] Code retrieval completed")
             
             yield self._yield_event("IMPLEMENTATION_PLAN", "Cloning repository and planning modifications...")
             branch_name = self._clone_repo()
+            _log.info(f"[AGENT] Workspace initialized and branch {branch_name} created")
             
             error_feedback = None
             success = False
             
             # Max 3 attempts
             for attempt in range(1, 4):
+                _log.info(f"[AGENT] Generation attempt {attempt}/3 started")
                 yield self._yield_event("CODE_MODIFICATION", f"Generating and applying code changes (Attempt {attempt}/3)...")
                 edits = self._generate_edits(context, error_feedback)
                 self._apply_edits(edits)
+                _log.info(f"[AGENT] Code modification applied for attempt {attempt}")
                 
                 yield self._yield_event("TEST_EXECUTION", f"Running tests (Attempt {attempt}/3)...")
                 code, output = self._detect_and_run_tests()
+                _log.info(f"[AGENT] Test execution completed for attempt {attempt} with code {code}")
                 
                 if code == 0:
                     success = True
@@ -230,19 +250,24 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
                     yield self._yield_event("FAILURE_ANALYSIS", f"Tests failed. Analyzing failure...\n{output[-500:]}")
             
             if not success:
+                _log.info("[AGENT] Failed after 3 attempts")
                 yield self._yield_event("ERROR", "Agent failed to implement the feature after 3 attempts.", {"details": error_feedback})
                 return
                 
             yield self._yield_event("GIT_COMMIT", "Changes successful. Committing and pushing...")
-            self._run_cmd(["git", "add", "."])
-            self._run_cmd(["git", "commit", "-m", f"Implement: {self.task}"])
-            self._run_cmd(["git", "push", "-u", "origin", branch_name])
+            code, out = self._run_cmd(["git", "add", "."])
+            code, out = self._run_cmd(["git", "commit", "-m", f"Implement: {self.task}"])
+            code, out = self._run_cmd(["git", "push", "-u", "origin", branch_name])
+            if code != 0:
+                raise RuntimeError(f"Failed to push branch: {out}")
+            _log.info("[AGENT] Branch pushed to remote")
             
             yield self._yield_event("GITHUB_PR", "Creating Pull Request...")
             pr_url = self._create_pull_request(branch_name)
+            _log.info(f"[AGENT] PR created successfully: {pr_url}")
             
             yield self._yield_event("COMPLETED", "Task completed successfully!", {"pr_url": pr_url})
             
         except Exception as e:
-            _log.exception("Agent execution failed")
+            _log.exception("[AGENT] Execution failed with exception")
             yield self._yield_event("ERROR", f"Agent execution failed: {str(e)}")

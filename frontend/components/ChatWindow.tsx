@@ -166,6 +166,7 @@ interface ChatWindowProps {
   username: string;
   activeSession: string | null;
   activeRepoUrl: string | null;
+  activeSessionStatus?: string | null;
   ingestStep: IngestStep | null;
   ingestRepoUrl: string | null;
   onToggleSidebar: () => void;
@@ -204,6 +205,7 @@ export default function ChatWindow({
   username,
   activeSession,
   activeRepoUrl,
+  activeSessionStatus,
   ingestStep,
   ingestRepoUrl,
   onToggleSidebar,
@@ -245,6 +247,56 @@ export default function ChatWindow({
         />
         <div className="flex-1 overflow-y-auto">
           <IngestProgress currentStep={ingestStep} repoUrl={ingestRepoUrl} />
+        </div>
+      </main>
+    );
+  }
+  
+  // STATE 1b: Session status not completed (Failed, Processing, etc)
+  if (activeSession && activeSessionStatus && activeSessionStatus !== "completed") {
+    return (
+      <main className="relative flex flex-1 flex-col overflow-hidden h-full">
+        <Header
+          onToggleSidebar={onToggleSidebar}
+          activeSession={activeSession}
+          activeRepoUrl={activeRepoUrl}
+        />
+        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8 flex flex-col items-center justify-center">
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-md text-center p-8 rounded-2xl border border-[#1e1e1e] bg-[#111111]"
+          >
+            {activeSessionStatus === "failed" || activeSessionStatus === "error" ? (
+              <>
+                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-red-500/10 mb-4">
+                  <svg className="w-8 h-8 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </div>
+                <h3 className="text-xl font-bold text-white mb-2">Ingestion Failed</h3>
+                <p className="text-zinc-400 text-sm mb-6">
+                  This repository encountered an error during ingestion and cannot be queried. Please retry the ingestion process.
+                </p>
+                <button
+                  onClick={() => window.location.href = "/dashboard"}
+                  className="px-6 py-2 bg-white text-black font-medium rounded-full hover:bg-zinc-200 transition-colors"
+                >
+                  Return to Dashboard
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="mx-auto flex h-14 w-14 items-center justify-center mb-4">
+                  <div className="h-8 w-8 animate-spin rounded-full border-t-2 border-[#00ff88]" />
+                </div>
+                <h3 className="text-xl font-bold text-white mb-2">Session {activeSessionStatus}</h3>
+                <p className="text-zinc-400 text-sm">
+                  Please wait while the repository status is being checked or processed...
+                </p>
+              </>
+            )}
+          </motion.div>
         </div>
       </main>
     );
