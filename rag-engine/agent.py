@@ -85,12 +85,14 @@ class CodingAgent:
 
     def _get_code_context(self):
         """Retrieves relevant code context using the existing vector store."""
-        from main import get_vector_store, rerank_documents, RETRIEVAL_TOP_K
+        from main import get_vector_store, RETRIEVAL_TOP_K
         
         vector_store = get_vector_store()
         
         # Pre-filter by session ID
         filter_dict = {"session_id": self.session_id}
+        
+        _log.info("[AGENT] CODE_RETRIEVAL started")
         
         docs = vector_store.similarity_search(
             self.task,
@@ -98,17 +100,20 @@ class CodingAgent:
             pre_filter=filter_dict
         )
         
+        _log.info("[AGENT] vector retrieval completed")
+        
         if not docs:
             return "No relevant code found in the repository."
             
-        reranked_docs = rerank_documents(self.task, docs)
+        _log.info("[AGENT] reranking skipped for coding agent")
         
         context_parts = []
-        for doc in reranked_docs:
+        for doc in docs:
             source = doc.metadata.get("source", "Unknown")
             content = doc.page_content
             context_parts.append(f"--- File: {source} ---\n{content}")
             
+        _log.info("[AGENT] context ready")
         return "\n\n".join(context_parts)
 
     def _generate_edits(self, context: str, error_feedback: str = None):
@@ -221,8 +226,8 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
         try:
             yield self._yield_event("CODE_RETRIEVAL", "Analyzing task and retrieving code context...")
             context = self._get_code_context()
-            _log.info("[AGENT] Code retrieval completed")
             
+            _log.info("[AGENT] IMPLEMENTATION_PLAN started")
             yield self._yield_event("IMPLEMENTATION_PLAN", "Cloning repository and planning modifications...")
             branch_name = self._clone_repo()
             _log.info(f"[AGENT] Workspace initialized and branch {branch_name} created")
