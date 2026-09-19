@@ -30,18 +30,14 @@ from logger import get_logger
 _log = get_logger(__name__)
 
 def log_memory(label, logger=None):
-    """Log Linux RSS memory usage (reads /proc/self/status). Fail-safe."""
+    """Log cross-platform RSS memory usage. Fail-safe."""
     _l = logger or _log
     try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    kb = int(line.split()[1])
-                    mb = kb / 1024
-                    _l.info(
-                        f"MEMORY | {label} | RSS={mb:.1f} MB"
-                    )
-                    return
+        import psutil
+        process = psutil.Process(os.getpid())
+        rss_bytes = process.memory_info().rss
+        mb = rss_bytes / (1024 * 1024)
+        _l.info(f"MEMORY | {label} | RSS={mb:.1f} MB")
     except Exception as e:
         _l.warning(f"Could not read memory usage: {e}")
 
@@ -581,23 +577,72 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                               message=f"Splitting {len(docs)} files into chunks...")
         log_memory("BEFORE RecursiveCharacterTextSplitter chunking", logger=log)
         
-        # Use LangChain's RecursiveCharacterTextSplitter for semantic code boundaries
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        log_memory("BEFORE splitter construction", logger=log)
         
-        chunk_size = 6000
-        chunk_overlap = 600
+        class SimpleRecursiveTextSplitter:
+            def __init__(self, chunk_size=6000, chunk_overlap=600):
+                self.chunk_size = chunk_size
+                self.chunk_overlap = chunk_overlap
+                self.separators = ["\n\n", "\n", " ", ""]
+
+            def split_text(self, text, separators):
+                if len(text) <= self.chunk_size:
+                    return [text]
+                
+                separator = separators[0]
+                new_separators = separators[1:] if len(separators) > 1 else []
+                
+                if separator:
+                    splits = text.split(separator)
+                else:
+                    splits = list(text)
+                    
+                chunks = []
+                current_chunk = []
+                current_len = 0
+                
+                for split in splits:
+                    split_len = len(split) if not separator else len(split) + len(separator)
+                    if current_len + split_len > self.chunk_size and current_chunk:
+                        chunks.append((separator if separator else "").join(current_chunk))
+                        current_chunk = [split]
+                        current_len = split_len
+                    else:
+                        current_chunk.append(split)
+                        current_len += split_len
+                        
+                if current_chunk:
+                    chunks.append((separator if separator else "").join(current_chunk))
+                    
+                final_chunks = []
+                for chunk in chunks:
+                    if len(chunk) > self.chunk_size and new_separators:
+                        final_chunks.extend(self.split_text(chunk, new_separators))
+                    else:
+                        final_chunks.append(chunk)
+                return final_chunks
+
+            def split_documents(self, docs):
+                import copy
+                new_docs = []
+                for doc in docs:
+                    chunks = self.split_text(getattr(doc, 'page_content', ''), self.separators)
+                    for chunk in chunks:
+                        new_doc = copy.deepcopy(doc)
+                        new_doc.page_content = chunk
+                        new_docs.append(new_doc)
+                return new_docs
+
+        text_splitter = SimpleRecursiveTextSplitter(chunk_size=6000, chunk_overlap=600)
+        log_memory("AFTER splitter construction", logger=log)
         
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            # Recursive splitters try these separators in order to keep semantic blocks together
-            separators=["\n\n", "\n", " ", ""]
-        )
-        
+        log_memory("BEFORE split_documents()", logger=log)
         chunks = text_splitter.split_documents(docs)
+        log_memory("AFTER split_documents()", logger=log)
 
         approx_chunk_chars = sum(len(getattr(c, 'page_content', '')) for c in chunks)
-        log_memory(f"AFTER RecursiveCharacterTextSplitter chunking ({len(chunks)} chunks, ~{approx_chunk_chars} chars)", logger=log)
+        max_chunk_len = max((len(getattr(c, 'page_content', '')) for c in chunks), default=0)
+        log_memory(f"CHUNK STATS: {len(chunks)} chunks, ~{approx_chunk_chars} chars, max_len={max_chunk_len}, docs={len(docs)}", logger=log)
         log.info("Chunking complete, %d chunks created", len(chunks),
                  extra={"chunk_count": len(chunks)})
 
@@ -612,15 +657,18 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
         collection = get_sync_collection(DB_NAME, COLLECTION_NAME)
 
         # Retrieve existing chunk hashes for this specific session_id AND repo_url
+        log_memory("BEFORE MongoDB existing chunk_hash lookup", logger=log)
         existing_docs = list(collection.find(
             {"session_id": session_id, "repo_url": repo_url},
             {"chunk_hash": 1, "_id": 1}
         ))
         existing_hashes = {doc["chunk_hash"] for doc in existing_docs if "chunk_hash" in doc}
+        log_memory(f"AFTER MongoDB existing chunk_hash lookup (found {len(existing_hashes)})", logger=log)
         
         # Enrich chunk metadata and compute deterministic chunk hash
         current_hashes = set()
         chunks_to_add = []
+        log_memory("BEFORE chunk_hash generation", logger=log)
         for chunk in chunks:
             chunk.metadata["session_id"] = session_id
             chunk.metadata["repo_url"] = repo_url
@@ -636,7 +684,10 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             if chunk_hash not in existing_hashes:
                 chunks_to_add.append(chunk)
 
+        log_memory("AFTER chunk_hash generation", logger=log)
+        log_memory("BEFORE differential comparison", logger=log)
         chunks_to_delete = existing_hashes - current_hashes
+        log_memory("AFTER differential comparison", logger=log)
         
         log.info("Deduplication analysis complete", extra={
             "total_chunks": len(chunks),
@@ -697,15 +748,16 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
                 batch_num = (i // BATCH_SIZE) + 1
                 total_batches = (len(chunks_to_add) + BATCH_SIZE - 1) // BATCH_SIZE
                 log.info("Embedding and uploading batch", extra={"batch": batch_num, "total_batches": total_batches, "chunk_count": len(batch)})
-                log_memory(f"BEFORE vector-store batch insertion (Batch {batch_num}, {len(batch)} docs)", logger=log)
-
+                
+                log_memory(f"BEFORE Gemini embedding request (Batch {batch_num})", logger=log)
                 max_batch_retries = EMBEDDING_MAX_RETRIES
                 backoff_delay = 5.0
                 for attempt in range(1, max_batch_retries + 1):
                     try:
+                        # add_documents handles embedding internally, but we log around it
                         vector_store.add_documents(batch)
+                        log_memory(f"AFTER MongoDB insert & embedding response (Batch {batch_num})", logger=log)
                         total_uploaded += len(batch)
-                        log_memory(f"AFTER vector-store batch insertion (Batch {batch_num})", logger=log)
                         break
                     except Exception as exc:
                         # Daily quota is permanent until midnight — fail fast with a clear message.
@@ -734,6 +786,7 @@ def ingest_repository(session_id: str, repo_url: str) -> dict:
             log.info("Stored %d new vectors in MongoDB", total_uploaded,
                      extra={"vectors_uploaded": total_uploaded})
 
+        log_memory("AFTER ingestion completion (before cleanup)", logger=log)
         return {
             "files_loaded": len(docs),
             "chunks_created": len(chunks),
