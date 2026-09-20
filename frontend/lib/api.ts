@@ -206,6 +206,19 @@ export async function getSessionInfo(
 // Typed helpers — Autonomous Agent
 // ---------------------------------------------------------------------------
 
+export interface UserSession {
+  sessionId: string;
+  repositoryUrl: string;
+  status: string;
+  createdAt: string;
+}
+
+export async function getUserSessions(): Promise<UserSession[]> {
+  const response = await ingestFetch("/api/sessions");
+  const data = await response.json();
+  return data.sessions || [];
+}
+
 export interface AgentTaskBody {
   task: string;
 }

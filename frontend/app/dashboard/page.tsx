@@ -12,7 +12,7 @@ import Sidebar from "@/components/Sidebar";
 import ChatWindow, { type Message, type IngestStep } from "@/components/ChatWindow";
 import Toast, { useToast } from "@/components/Toast";
 import { getUsername } from "@/lib/auth";
-import { apiFetch, getIngestStatus } from "@/lib/api";
+import { apiFetch, getIngestStatus, getUserSessions } from "@/lib/api";
 
 interface ChatSession {
   id: string;
@@ -31,13 +31,37 @@ export default function DashboardPage() {
   const [activeRepoUrl, setActiveRepoUrl] = useState<string | null>(null);
   const [activeSessionStatus, setActiveSessionStatus] = useState<string | null>(null);
 
-  // Load sessions from localStorage on mount
+  // Load sessions from localStorage and backend on mount
   useEffect(() => {
     try {
       const saved = localStorage.getItem("ragnarok_sessions");
       if (saved) {
         setSessions(JSON.parse(saved));
       }
+      
+      // Fetch persisted sessions from backend
+      getUserSessions().then((backendSessions) => {
+        if (backendSessions && backendSessions.length > 0) {
+          const formattedSessions = backendSessions.map((s: any) => ({
+            id: s.sessionId,
+            title: s.repositoryUrl.split("/").pop() || "Repository",
+            repoUrl: s.repositoryUrl,
+            timestamp: new Date(s.createdAt).toLocaleDateString(),
+          }));
+          
+          setSessions((prev) => {
+            // Merge backend sessions with existing (local) ones
+            const merged = [...prev];
+            for (const bs of formattedSessions) {
+              if (!merged.find(m => m.id === bs.id)) {
+                merged.push(bs);
+              }
+            }
+            // Sort newest first
+            return merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+          });
+        }
+      }).catch(err => console.error("Failed to fetch backend sessions:", err));
       const active = localStorage.getItem("ragnarok_active_session");
       if (active) {
         setActiveSession(active);
