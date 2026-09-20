@@ -557,7 +557,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
     try:
         cached_response = redis_client.get(cache_key)
         if cached_response:
-            _log.info("Cache hit, serving from Redis", extra={"session_id": session_id})
+            _log.info("[CHAT] Cache HIT", extra={"session_id": session_id})
 
             async def stream_cache():
                 words = cached_response.split(" ")
@@ -574,8 +574,11 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                 media_type="text/event-stream",
                 headers={"X-Cache": "HIT"},
             )
+        else:
+            _log.info("[CHAT] Cache MISS", extra={"session_id": session_id})
     except Exception as e:
         _log.warning("Cache check failed", extra={"session_id": session_id, "error": str(e)})
+        _log.info("[CHAT] Cache MISS", extra={"session_id": session_id})
 
     # -------------------------------------------------
     # STEP 2: CONVERSATION MEMORY — Retrieve
@@ -699,6 +702,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
 
             for provider_name, stream_fn in providers:
                 try:
+                    _log.info(f"[CHAT] Calling {provider_name.capitalize()}", extra={"session_id": session_id})
                     yielded_any = False
                     full_response = []
                     async for chunk in stream_fn(system_prompt, user_query):
