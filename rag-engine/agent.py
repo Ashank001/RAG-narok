@@ -1,4 +1,5 @@
 import os
+import time
 import tempfile
 import subprocess
 import json
@@ -143,14 +144,51 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
     ]
 }
 """
-        response = self.client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2
-            )
-        )
+        max_retries = 3
+        base_delay = 5  # seconds
+        last_exc = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.client.models.generate_content(
+                    model="gemini-3.6-flash",
+                    contents=prompt,
+                    config=genai.types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2
+                    )
+                )
+                break  # Success
+            except Exception as exc:
+                last_exc = exc
+                exc_str = str(exc)
+                
+                # Extract HTTP status code from the exception message
+                status_code = None
+                for code in [429, 500, 503]:
+                    if str(code) in exc_str:
+                        status_code = code
+                        break
+                
+                # Check for permanent errors — do NOT retry
+                for perm_code in [400, 401, 403, 404]:
+                    if str(perm_code) in exc_str:
+                        _log.error(f"[AGENT] Gemini call failed: {perm_code} (permanent error, not retrying)")
+                        raise exc
+                
+                if status_code and attempt < max_retries:
+                    delay = base_delay * (2 ** (attempt - 1))  # 5s, 10s, 20s
+                    _log.warning(f"[AGENT] Gemini call failed: {status_code}")
+                    _log.info(f"[AGENT] Retrying Gemini call in {delay}s (attempt {attempt}/{max_retries})")
+                    time.sleep(delay)
+                elif status_code and attempt == max_retries:
+                    _log.error(f"[AGENT] Gemini call failed: {status_code}")
+                    _log.error(f"[AGENT] All {max_retries} retries exhausted for Gemini call")
+                    raise exc
+                else:
+                    # Unknown error — don't retry
+                    _log.error(f"[AGENT] Gemini call failed with unexpected error: {exc_str[:200]}")
+                    raise exc
         
         try:
             return json.loads(response.text)
