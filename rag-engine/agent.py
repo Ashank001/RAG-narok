@@ -5,7 +5,7 @@ import subprocess
 import json
 import logging
 import httpx
-import google.genai as genai
+from langchain_core.messages import SystemMessage, HumanMessage
 from urllib.parse import urlparse
 
 _log = logging.getLogger(__name__)
@@ -18,11 +18,12 @@ class CodingAgent:
         self.github_token = github_token
         self.workspace = tempfile.mkdtemp(prefix=f"agent_{session_id}_")
         
-        # Initialize Gemini Client
-        gemini_api_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_api_key:
-            raise ValueError("GEMINI_API_KEY is required for the coding agent.")
-        self.client = genai.Client(api_key=gemini_api_key)
+        # Initialize Groq Client from main configuration
+        from main import llm
+        if not llm:
+            raise ValueError("GROQ_API_KEY is required for the coding agent.")
+        # Bind JSON object mode for structured output
+        self.llm = llm.bind(response_format={"type": "json_object"})
         
         # Parse owner and repo from URL
         parsed = urlparse(repo_url)
@@ -97,7 +98,7 @@ class CodingAgent:
         
         docs = vector_store.similarity_search(
             self.task,
-            k=RETRIEVAL_TOP_K,
+            k=3,
             pre_filter=filter_dict
         )
         
@@ -119,7 +120,7 @@ class CodingAgent:
         _log.info(f"[AGENT] Context size before limit: {len(full_context)} chars")
         
         # Apply chunk-based limiting
-        max_chars = int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "4000"))
+        max_chars = 2000
         context_parts = []
         current_size = 0
         
@@ -178,16 +179,11 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
         base_delay = 5  # seconds
         last_exc = None
         
+        messages = [HumanMessage(content=prompt)]
+        
         for attempt in range(1, max_retries + 1):
             try:
-                response = self.client.models.generate_content(
-                    model="gemini-3.6-flash",
-                    contents=prompt,
-                    config=genai.types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.2
-                    )
-                )
+                response = self.llm.invoke(messages)
                 break  # Success
             except Exception as exc:
                 last_exc = exc
@@ -203,27 +199,27 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
                 # Check for permanent errors — do NOT retry
                 for perm_code in [400, 401, 403, 404]:
                     if str(perm_code) in exc_str:
-                        _log.error(f"[AGENT] Gemini call failed: {perm_code} (permanent error, not retrying)")
+                        _log.error(f"[AGENT] Groq call failed: {perm_code} (permanent error, not retrying)")
                         raise exc
                 
                 if status_code and attempt < max_retries:
                     delay = base_delay * (2 ** (attempt - 1))  # 5s, 10s, 20s
-                    _log.warning(f"[AGENT] Gemini call failed: {status_code}")
-                    _log.info(f"[AGENT] Retrying Gemini call in {delay}s (attempt {attempt}/{max_retries})")
+                    _log.warning(f"[AGENT] Groq call failed: {status_code}")
+                    _log.info(f"[AGENT] Retrying Groq call in {delay}s (attempt {attempt}/{max_retries})")
                     time.sleep(delay)
                 elif status_code and attempt == max_retries:
-                    _log.error(f"[AGENT] Gemini call failed: {status_code}")
-                    _log.error(f"[AGENT] All {max_retries} retries exhausted for Gemini call")
+                    _log.error(f"[AGENT] Groq call failed: {status_code}")
+                    _log.error(f"[AGENT] All {max_retries} retries exhausted for Groq call")
                     raise exc
                 else:
                     # Unknown error — don't retry
-                    _log.error(f"[AGENT] Gemini call failed with unexpected error: {exc_str[:200]}")
+                    _log.error(f"[AGENT] Groq call failed with unexpected error: {exc_str[:200]}")
                     raise exc
         
         try:
-            return json.loads(response.text)
+            return json.loads(response.content)
         except Exception as e:
-            _log.error(f"Failed to parse LLM response: {response.text}")
+            _log.error(f"Failed to parse LLM response: {response.content}")
             raise ValueError("LLM returned invalid JSON.")
 
     def _apply_edits(self, edits: dict):
