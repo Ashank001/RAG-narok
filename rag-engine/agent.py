@@ -107,15 +107,45 @@ class CodingAgent:
             return "No relevant code found in the repository."
             
         _log.info("[AGENT] reranking skipped for coding agent")
+        _log.info(f"[AGENT] Retrieved {len(docs)} chunks")
         
-        context_parts = []
+        # Compute before size
+        initial_parts = []
         for doc in docs:
             source = doc.metadata.get("source", "Unknown")
             content = doc.page_content
-            context_parts.append(f"--- File: {source} ---\n{content}")
+            initial_parts.append(f"--- File: {source} ---\n{content}")
+        full_context = "\n\n".join(initial_parts)
+        _log.info(f"[AGENT] Context size before limit: {len(full_context)} chars")
+        
+        # Apply chunk-based limiting
+        max_chars = int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "4000"))
+        context_parts = []
+        current_size = 0
+        
+        for doc in docs:
+            source = doc.metadata.get("source", "Unknown")
+            content = doc.page_content
+            chunk_str = f"--- File: {source} ---\n{content}"
+            chunk_size = len(chunk_str) + 2  # accounts for join separator
             
-        _log.info("[AGENT] context ready")
-        return "\n\n".join(context_parts)
+            if current_size + chunk_size <= max_chars:
+                context_parts.append(chunk_str)
+                current_size += chunk_size
+            else:
+                # Truncate this chunk if no chunks added yet, otherwise drop lower-ranked ones
+                if not context_parts:
+                    context_parts.append(chunk_str[:max_chars])
+                break
+                
+        final_context = "\n\n".join(context_parts)
+        
+        # Enforce final hard character limit just to be safe
+        if len(final_context) > max_chars:
+            final_context = final_context[:max_chars]
+            
+        _log.info(f"[AGENT] Context size after limit: {len(final_context)} chars")
+        return final_context
 
     def _generate_edits(self, context: str, error_feedback: str = None):
         """Uses LLM to generate file modifications."""

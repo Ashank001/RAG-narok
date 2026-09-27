@@ -53,10 +53,6 @@ from config import celery_app, get_sync_db, get_sync_collection
 log_memory("AFTER config imports")
 
 # LangChain Imports — AFTER load_dotenv() so thread limits are active
-log_memory("BEFORE langchain_huggingface")
-# pyrefly: ignore [missing-import]
-from langchain_huggingface import HuggingFaceEmbeddings
-log_memory("AFTER langchain_huggingface")
 
 log_memory("BEFORE langchain_mongodb")
 # pyrefly: ignore [missing-import]
