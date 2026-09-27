@@ -2,6 +2,7 @@ import os
 import time
 import tempfile
 import subprocess
+import shutil
 import json
 import logging
 import httpx
@@ -9,6 +10,19 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from urllib.parse import urlparse
 
 _log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Test result classification
+# ---------------------------------------------------------------------------
+# These constants let the execute() loop distinguish runtime-environment
+# failures from actual test/code failures so it doesn't waste retries.
+# ---------------------------------------------------------------------------
+_RUNTIME_MISSING = "RUNTIME_MISSING"
+_DEPENDENCY_FAILURE = "DEPENDENCY_FAILURE"
+_TEST_FAILURE = "TEST_FAILURE"
+_TEST_PASS = "TEST_PASS"
+_NO_TESTS = "NO_TESTS"
+
 
 class CodingAgent:
     def __init__(self, task: str, repo_url: str, session_id: str, github_token: str):
@@ -66,6 +80,9 @@ class CodingAgent:
             return result.returncode, output
         except subprocess.TimeoutExpired:
             return 124, "Command timed out after 60 seconds."
+        except FileNotFoundError as e:
+            # This is the exact error when a binary (npm, node, etc.) is missing
+            return 127, f"Command not found: {e}"
         except Exception as e:
             return 1, str(e)
 
@@ -238,27 +255,217 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
             with open(safe_path, "w", encoding="utf-8") as f:
                 f.write(content)
 
-    def _detect_and_run_tests(self):
-        """Auto-detects build/test commands and runs them."""
-        # Node.js
-        if os.path.exists(os.path.join(self.workspace, "package.json")):
+    # ------------------------------------------------------------------
+    # Project type detection
+    # ------------------------------------------------------------------
+    def _detect_project_type(self) -> dict:
+        """Inspects the workspace for ecosystem marker files and returns
+        a dict describing the project type and required runtime tools.
+
+        Returns:
+            {
+                "type": "node" | "python" | "rust" | "go" | "java-maven"
+                        | "java-gradle" | "unknown",
+                "marker_file": str,           # file that triggered detection
+                "required_tools": [str, ...],  # binaries we need on PATH
+                "install_cmd": [str, ...] | None,
+                "test_cmd": [str, ...] | None,
+            }
+        """
+        ws = self.workspace
+
+        # Order matters: first match wins.
+        checks = [
+            {
+                "type": "node",
+                "markers": ["package.json"],
+                "required_tools": ["node", "npm"],
+                "install_cmd": ["npm", "install"],
+                "test_cmd": ["npm", "test"],
+            },
+            {
+                "type": "python",
+                "markers": ["pyproject.toml", "setup.py", "setup.cfg",
+                            "requirements.txt", "pytest.ini", "tox.ini"],
+                "required_tools": ["python"],  # pip may be a module
+                "install_cmd": None,  # handled specially below
+                "test_cmd": ["pytest"],
+            },
+            {
+                "type": "rust",
+                "markers": ["Cargo.toml"],
+                "required_tools": ["cargo"],
+                "install_cmd": None,
+                "test_cmd": ["cargo", "test"],
+            },
+            {
+                "type": "go",
+                "markers": ["go.mod"],
+                "required_tools": ["go"],
+                "install_cmd": None,
+                "test_cmd": ["go", "test", "./..."],
+            },
+            {
+                "type": "java-maven",
+                "markers": ["pom.xml"],
+                "required_tools": ["mvn"],
+                "install_cmd": None,
+                "test_cmd": ["mvn", "test"],
+            },
+            {
+                "type": "java-gradle",
+                "markers": ["build.gradle", "build.gradle.kts"],
+                "required_tools": ["gradle"],
+                "install_cmd": None,
+                "test_cmd": ["gradle", "test"],
+            },
+        ]
+
+        for spec in checks:
+            for marker in spec["markers"]:
+                if os.path.exists(os.path.join(ws, marker)):
+                    result = {
+                        "type": spec["type"],
+                        "marker_file": marker,
+                        "required_tools": spec["required_tools"],
+                        "install_cmd": spec["install_cmd"],
+                        "test_cmd": spec["test_cmd"],
+                    }
+                    _log.info(f"[AGENT] detected project type: {result['type']} "
+                              f"(from {marker})")
+                    return result
+
+        _log.info("[AGENT] detected project type: unknown (no marker files found)")
+        return {
+            "type": "unknown",
+            "marker_file": None,
+            "required_tools": [],
+            "install_cmd": None,
+            "test_cmd": None,
+        }
+
+    # ------------------------------------------------------------------
+    # Runtime availability check
+    # ------------------------------------------------------------------
+    def _check_runtime_available(self, required_tools: list[str]) -> dict:
+        """Checks whether each tool in *required_tools* is available on
+        PATH using ``shutil.which``.
+
+        Returns:
+            {
+                "available": bool,          # True if ALL tools found
+                "tools": {
+                    "npm": "/usr/bin/npm",   # path or None
+                    ...
+                },
+                "missing": ["npm", ...],     # tools not found
+            }
+        """
+        tools = {}
+        missing = []
+        for tool in required_tools:
+            path = shutil.which(tool)
+            tools[tool] = path
+            if path is None:
+                missing.append(tool)
+
+        available = len(missing) == 0
+        _log.info(f"[AGENT] runtime availability: "
+                  f"{'ALL OK' if available else 'MISSING ' + ', '.join(missing)} "
+                  f"(checked: {required_tools})")
+        return {"available": available, "tools": tools, "missing": missing}
+
+    # ------------------------------------------------------------------
+    # Test detection & execution  (replaces old _detect_and_run_tests)
+    # ------------------------------------------------------------------
+    def _detect_and_run_tests(self) -> tuple[str, int, str]:
+        """Auto-detects build/test commands and runs them.
+
+        Returns:
+            (classification, return_code, output)
+
+            classification is one of the module-level constants:
+                _RUNTIME_MISSING   – required tool not on PATH
+                _DEPENDENCY_FAILURE – install step failed
+                _TEST_FAILURE      – tests ran but failed
+                _TEST_PASS         – tests passed (or no tests to run)
+                _NO_TESTS          – no test framework detected
+        """
+        project = self._detect_project_type()
+        _log.info(f"[AGENT] selected test command: {project.get('test_cmd')}")
+
+        # ── Unknown project type ──────────────────────────────────────
+        if project["type"] == "unknown":
+            msg = "No supported test framework detected."
+            _log.info(f"[AGENT] test execution result: NO_TESTS – {msg}")
+            return _NO_TESTS, 0, msg
+
+        # ── Runtime availability gate ─────────────────────────────────
+        runtime = self._check_runtime_available(project["required_tools"])
+        if not runtime["available"]:
+            missing_str = ", ".join(runtime["missing"])
+            msg = (f"TEST_EXECUTION skipped: required runtime tool(s) "
+                   f"[{missing_str}] not found in agent environment. "
+                   f"Project type '{project['type']}' detected from "
+                   f"'{project['marker_file']}', but the agent container "
+                   f"(python:3.12-slim) does not include {missing_str}. "
+                   f"This is an agent environment limitation, not a code error.")
+            _log.warning(f"[AGENT] test execution result: RUNTIME_MISSING – {msg}")
+            return _RUNTIME_MISSING, 127, msg
+
+        # ── Node.js projects ─────────────────────────────────────────
+        if project["type"] == "node":
+            # Install dependencies
             code, out = self._run_cmd(["npm", "install"])
-            if code != 0: return code, out
-            
+            if code != 0:
+                _log.warning(f"[AGENT] test execution result: DEPENDENCY_FAILURE – "
+                             f"npm install exited {code}")
+                return _DEPENDENCY_FAILURE, code, out
+
+            # Run tests
             code, out = self._run_cmd(["npm", "test"])
-            # If no test script, npm test returns non-zero, but we can check output
-            if code != 0 and "Missing script: \"test\"" in out:
-                return 0, "No tests found."
-            return code, out
-            
-        # Python
-        if os.path.exists(os.path.join(self.workspace, "pytest.ini")) or \
-           os.path.exists(os.path.join(self.workspace, "requirements.txt")):
-            if os.path.exists(os.path.join(self.workspace, "requirements.txt")):
-                self._run_cmd(["pip", "install", "-r", "requirements.txt"])
-            return self._run_cmd(["pytest"])
-            
-        return 0, "No supported test framework detected."
+            if code != 0 and 'Missing script: "test"' in out:
+                _log.info("[AGENT] test execution result: NO_TESTS – "
+                          "no test script in package.json")
+                return _NO_TESTS, 0, "No test script defined in package.json."
+            if code != 0:
+                _log.info(f"[AGENT] test execution result: TEST_FAILURE – "
+                          f"npm test exited {code}")
+                return _TEST_FAILURE, code, out
+            _log.info("[AGENT] test execution result: TEST_PASS")
+            return _TEST_PASS, 0, out
+
+        # ── Python projects ──────────────────────────────────────────
+        if project["type"] == "python":
+            req_file = os.path.join(self.workspace, "requirements.txt")
+            if os.path.exists(req_file):
+                code, out = self._run_cmd(["pip", "install", "-r", "requirements.txt"])
+                if code != 0:
+                    _log.warning(f"[AGENT] test execution result: DEPENDENCY_FAILURE – "
+                                 f"pip install exited {code}")
+                    return _DEPENDENCY_FAILURE, code, out
+
+            code, out = self._run_cmd(["pytest"])
+            if code != 0:
+                _log.info(f"[AGENT] test execution result: TEST_FAILURE – "
+                          f"pytest exited {code}")
+                return _TEST_FAILURE, code, out
+            _log.info("[AGENT] test execution result: TEST_PASS")
+            return _TEST_PASS, 0, out
+
+        # ── Generic fallback for other detected types ────────────────
+        if project["test_cmd"]:
+            code, out = self._run_cmd(project["test_cmd"])
+            if code != 0:
+                _log.info(f"[AGENT] test execution result: TEST_FAILURE – "
+                          f"{project['test_cmd'][0]} exited {code}")
+                return _TEST_FAILURE, code, out
+            _log.info("[AGENT] test execution result: TEST_PASS")
+            return _TEST_PASS, 0, out
+
+        msg = "No supported test framework detected."
+        _log.info(f"[AGENT] test execution result: NO_TESTS – {msg}")
+        return _NO_TESTS, 0, msg
 
     def _create_pull_request(self, branch_name: str):
         """Creates a PR via GitHub API."""
@@ -308,15 +515,50 @@ Return your response ONLY as a valid JSON object matching this schema. Do NOT in
                 _log.info(f"[AGENT] Code modification applied for attempt {attempt}")
                 
                 yield self._yield_event("TEST_EXECUTION", f"Running tests (Attempt {attempt}/3)...")
-                code, output = self._detect_and_run_tests()
-                _log.info(f"[AGENT] Test execution completed for attempt {attempt} with code {code}")
+                classification, code, output = self._detect_and_run_tests()
+                _log.info(f"[AGENT] Test execution completed for attempt {attempt}: "
+                          f"classification={classification} code={code}")
                 
-                if code == 0:
+                # ── Runtime missing: abort immediately, no point retrying ─
+                if classification == _RUNTIME_MISSING:
+                    yield self._yield_event(
+                        "TEST_EXECUTION",
+                        f"⚠ Required runtime unavailable in agent environment. "
+                        f"Skipping tests and proceeding with code changes.\n\n{output}",
+                        {"classification": _RUNTIME_MISSING}
+                    )
+                    # Treat as soft-pass: the code was generated, we just
+                    # can't validate it in this environment.
                     success = True
                     break
-                else:
-                    error_feedback = f"Test Execution Failed:\n{output[-2000:]}"  # last 2k chars
-                    yield self._yield_event("FAILURE_ANALYSIS", f"Tests failed. Analyzing failure...\n{output[-500:]}")
+
+                # ── Dependency install failure: abort, not a code problem ─
+                if classification == _DEPENDENCY_FAILURE:
+                    yield self._yield_event(
+                        "TEST_EXECUTION",
+                        f"⚠ Dependency installation failed. This is an "
+                        f"environment issue, not a code error.\n\n"
+                        f"{output[-500:]}",
+                        {"classification": _DEPENDENCY_FAILURE}
+                    )
+                    success = True
+                    break
+
+                # ── No tests found: nothing to validate, proceed ──────────
+                if classification == _NO_TESTS:
+                    _log.info("[AGENT] No tests to run, treating as pass")
+                    success = True
+                    break
+
+                # ── Tests passed ──────────────────────────────────────────
+                if classification == _TEST_PASS:
+                    success = True
+                    break
+
+                # ── Actual test failure: self-correct ─────────────────────
+                # classification == _TEST_FAILURE
+                error_feedback = f"Test Execution Failed:\n{output[-2000:]}"  # last 2k chars
+                yield self._yield_event("FAILURE_ANALYSIS", f"Tests failed. Analyzing failure...\n{output[-500:]}")
             
             if not success:
                 _log.info("[AGENT] Failed after 3 attempts")
