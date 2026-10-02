@@ -154,7 +154,7 @@ def test_vector_isolation_user_cannot_read_other_session(client, auth_headers_us
         Only returns bob_doc when the filter targets session_bob.
         """
         if pre_filter:
-            filter_val = pre_filter.get("metadata.session_id", {}).get("$eq")
+            filter_val = pre_filter.get("session_id", {}).get("$eq")
             if filter_val == "session_bob":
                 return [bob_doc]
         return []  # Alice's session returns nothing

@@ -39,7 +39,7 @@ try:
         client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=8000)
         n = client["api-gateway"].sessions.delete_many({"sessionId": SESSION_ID}).deleted_count
         print(f"  Deleted {n} stale session(s)")
-        v = client["rag_db"].code_vectors.delete_many({"metadata.session_id": SESSION_ID}).deleted_count
+        v = client["rag_db"].code_vectors.delete_many({"session_id": SESSION_ID}).deleted_count
         print(f"  Deleted {v} stale vector(s)")
     else:
         print("  MONGO_URI not set — skipping cleanup")

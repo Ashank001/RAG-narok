@@ -623,7 +623,7 @@ async def chat(request: Request, session_id: str, chat_request: ChatRequest, cur
                         retrieved_docs = get_vector_store().similarity_search(
                             user_query,
                             k=RETRIEVAL_TOP_K,
-                            post_filter_pipeline=[{"$match": {"session_id": session_id}}],
+                            pre_filter={"session_id": {"$eq": session_id}},
                         )
                         break
                     except Exception as search_exc:

@@ -109,7 +109,7 @@ class CodingAgent:
         vector_store = get_vector_store()
         
         # Pre-filter by session ID
-        filter_dict = {"session_id": self.session_id}
+        filter_dict = {"session_id": {"$eq": self.session_id}}
         
         _log.info("[AGENT] CODE_RETRIEVAL started")
         
